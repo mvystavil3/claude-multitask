@@ -1,0 +1,13 @@
+dist/
+multitask.config.json
+node_modules/
+release/
+workspaces/
+.multitask/
+recovered/
+
+# Secrets and local-only files
+.env
+.env.*
+*.log
+.claude/settings.local.json

@@ -1,0 +1,37 @@
+appId: com.claudemultitask.app
+productName: Claude Multitask
+directories:
+  output: release
+  buildResources: build
+# node-pty ships Node-API prebuilds that work in Electron unchanged, so there is no
+# native rebuild step and no Visual Studio toolchain needed to package.
+npmRebuild: false
+files:
+  - dist/**/*
+  - package.json
+  - node_modules/node-pty/**/*
+  - '!dist/smoke.cjs'
+  - '!**/*.map'
+# node-pty loads .node binaries and helper executables by path, so they must stay
+# outside the asar archive.
+asarUnpack:
+  - '**/node_modules/node-pty/**'
+# The Dockerfile the Images dialog builds must ship next to the app, not inside the asar.
+extraResources:
+  - from: build/docker
+    to: docker
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: ${productName}-${version}-${arch}.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  shortcutName: Claude Multitask
+portable:
+  artifactName: ${productName}-${version}-portable.${ext}

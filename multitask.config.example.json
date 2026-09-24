@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "grid": {
+    "cols": 3,
+    "rows": 3
+  },
+  "defaults": {
+    "profile": "cmd",
+    "model": "opus",
+    "claudeArgs": [],
+    "autoStart": false,
+    "autoSubmit": true,
+    "fontSize": 13,
+    "docker": {
+      "image": "claude-multitask:latest",
+      "workdir": "/work",
+      "claudeConfigMode": "shared"
+    },
+    "launch": "claude",
+    "theme": "everforest-dark"
+  },
+  "panes": [
+    {
+      "id": "01-refactor-auth",
+      "title": "Refactor auth",
+      "profile": "cmd",
+      "task": "Read notes.md in this folder and refactor the auth module described there. Write a summary to REPORT.md when you are done.",
+      "claudeArgs": [
+        "--permission-mode",
+        "acceptEdits"
+      ],
+      "workspace": "D:/work/checkout-service"
+    },
+    {
+      "id": "02-write-tests",
+      "title": "Write tests",
+      "profile": "powershell",
+      "model": "sonnet",
+      "task": "Create a test plan in PLAN.md, then implement it.",
+      "theme": "catppuccin-mocha",
+      "workspace": "workspaces/02-write-tests"
+    },
+    {
+      "id": "03-linux-build",
+      "title": "Linux build",
+      "profile": "wsl",
+      "distro": "Ubuntu-24.04",
+      "task": "Build the project with make and record any failures in BUILD.md.",
+      "claudeBin": "claude",
+      "theme": "nord"
+    },
+    {
+      "id": "04-scratch",
+      "title": "Scratch",
+      "workspace": "workspaces/04-scratch",
+      "task": "",
+      "autoSubmit": false
+    },
+    {
+      "id": "05-sandboxed",
+      "title": "Sandboxed deps",
+      "profile": "docker",
+      "task": "Install the dependencies listed in requirements.txt and report what breaks in REPORT.md.",
+      "docker": {
+        "image": "claude-multitask:py312",
+        "claudeConfigMode": "copy",
+        "extraArgs": [
+          "--memory=4g",
+          "--cpus=2"
+        ]
+      }
+    },
+    {
+      "id": "06-attach",
+      "title": "Existing container",
+      "profile": "docker",
+      "task": "",
+      "autoSubmit": false,
+      "docker": {
+        "mode": "exec",
+        "containerName": "my-running-devcontainer",
+        "workdir": "/workspaces/project"
+      }
+    },
+    {
+      "id": "07-test-watch",
+      "title": "Test watcher",
+      "launch": "command",
+      "command": "npm test -- --watch"
+    },
+    {
+      "id": "08-repl",
+      "title": "Python REPL",
+      "profile": "docker",
+      "launch": "command",
+      "command": "python3",
+      "task": "print('hello from the container')",
+      "docker": {
+        "image": "claude-multitask:py312",
+        "claudeConfigMode": "none"
+      }
+    },
+    {
+      "id": "09-terminal",
+      "title": "Plain terminal",
+      "launch": "shell"
+    }
+  ]
+}
