@@ -23,7 +23,7 @@ extraResources:
 win:
   target:
     - target: nsis
-      arch: [x64]
+      arch: [x64, arm64]
     - target: portable
       arch: [x64]
   artifactName: ${productName}-${version}-${arch}.${ext}
@@ -35,3 +35,25 @@ nsis:
   shortcutName: Claude Multitask
 portable:
   artifactName: ${productName}-${version}-portable.${ext}
+# macOS and Linux builds have to be made on those platforms: node-pty ships prebuilt
+# binaries for macOS and Windows, and compiles from source on Linux during npm install.
+# The mac build is unsigned unless CSC_LINK / CSC_KEY_PASSWORD are set, so Gatekeeper will
+# ask the user to allow it on first launch.
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+linux:
+  category: Development
+  # .deb packages require a maintainer; set your own "Name <email>" before publishing one.
+  maintainer: Claude Multitask contributors
+  target:
+    - target: AppImage
+      arch: [x64, arm64]
+    - target: deb
+      arch: [x64, arm64]
+  artifactName: ${productName}-${version}-linux-${arch}.${ext}

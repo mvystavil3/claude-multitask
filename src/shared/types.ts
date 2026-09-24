@@ -1,4 +1,26 @@
-export type ProfileId = 'cmd' | 'powershell' | 'wsl' | 'docker';
+export type ProfileId = 'cmd' | 'powershell' | 'wsl' | 'docker' | 'posix';
+
+/**
+ * Shells in the order Settings lists them, with the platforms each one exists on. Shared so
+ * the main process and the settings dialog agree on what a machine can run.
+ */
+export const PROFILES: { id: ProfileId; label: string; platforms?: string[] }[] = [
+  { id: 'posix', label: 'Login shell ($SHELL)', platforms: ['darwin', 'linux'] },
+  { id: 'cmd', label: 'Windows cmd', platforms: ['win32'] },
+  { id: 'powershell', label: 'PowerShell' },
+  { id: 'wsl', label: 'WSL', platforms: ['win32'] },
+  { id: 'docker', label: 'Docker container' },
+];
+
+export function profileAvailable(id: ProfileId, platform: string): boolean {
+  const entry = PROFILES.find((p) => p.id === id);
+  return !!entry && (!entry.platforms || entry.platforms.includes(platform));
+}
+
+/** What a fresh config uses: cmd on Windows, the user's own shell elsewhere. */
+export function defaultProfileFor(platform: string): ProfileId {
+  return platform === 'win32' ? 'cmd' : 'posix';
+}
 
 export type PaneStatus =
   | 'idle'
@@ -190,6 +212,8 @@ export interface PaneState {
 }
 
 export interface Preflight {
+  /** process.platform of the main process: 'win32', 'darwin' or 'linux'. */
+  platform: string;
   claudeOnPath: string | null;
   pwshOnPath: string | null;
   wslDistros: string[];

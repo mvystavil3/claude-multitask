@@ -1,0 +1,4 @@
+# Store text with LF in the repo whatever each contributor's editor writes; the working
+# copies here are a mix of CRLF and LF.
+* text=auto
+*.png binary

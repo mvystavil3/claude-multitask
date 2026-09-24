@@ -1,7 +1,7 @@
 {
   "name": "claude-multitask",
   "version": "1.0.0",
-  "description": "Grid of terminals, each running Claude Code on an independent task",
+  "description": "Grid of terminals, each running Claude Code on an independent task (Windows, macOS, Linux)",
   "main": "dist/main/index.js",
   "license": "MIT",
   "private": true,
@@ -11,7 +11,11 @@
     "dev": "node scripts/build.mjs --watch",
     "rebuild": "electron-rebuild -f -w node-pty",
     "typecheck": "tsc --noEmit",
+    "test": "esbuild scripts/test.ts --bundle --platform=node --format=cjs --external:node-pty --external:electron --outfile=dist/test.cjs --log-level=error && node --test --test-concurrency=1 dist/test.cjs",
     "dist": "npm run build && electron-builder",
+    "dist:win": "npm run build && electron-builder --win",
+    "dist:mac": "npm run build && electron-builder --mac",
+    "dist:linux": "npm run build && electron-builder --linux",
     "smoke": "esbuild scripts/smoke.ts --bundle --platform=node --format=cjs --external:node-pty --external:electron --outfile=dist/smoke.cjs",
     "check:themes": "esbuild scripts/check-themes.ts --bundle --platform=node --format=cjs --outfile=dist/check-themes.cjs --log-level=error && node dist/check-themes.cjs"
   },

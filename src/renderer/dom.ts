@@ -1,6 +1,38 @@
 /** Tiny DOM helpers shared by the dialogs. */
 import type { Theme } from '../shared/themes.js';
 
+/**
+ * App shortcuts use Cmd on macOS and Ctrl elsewhere. On a Mac, Ctrl belongs to the terminal
+ * entirely — Ctrl+C there is always an interrupt, as in Terminal.app.
+ */
+export const isMac = window.mt.platform === 'darwin';
+
+export const modKey = (e: KeyboardEvent): boolean => (isMac ? e.metaKey : e.ctrlKey);
+
+/**
+ * Whether the key is `letter`, on any keyboard layout. `e.key` follows the layout, which is
+ * what people expect on Latin layouts (AZERTY's M is where the M is printed), but on
+ * Cyrillic, Greek, Hebrew and similar layouts Ctrl+K reports "л", so fall back to the
+ * physical key there.
+ */
+export function keyIs(e: KeyboardEvent, letter: string): boolean {
+  const key = e.key.toLowerCase();
+  if (key === letter) return true;
+  return !/^[a-z]$/.test(key) && e.code === `Key${letter.toUpperCase()}`;
+}
+
+/**
+ * The digit 1–9 of the physical number row, or null. `e.key` cannot be used: AZERTY
+ * reports "&" for the 1 key, and Shift or AltGr change it on many other layouts.
+ */
+export function digitOf(e: KeyboardEvent): number | null {
+  const match = /^(?:Digit|Numpad)([1-9])$/.exec(e.code);
+  return match ? Number(match[1]) : null;
+}
+
+/** Shortcut text for tooltips and hints, written once as "Ctrl+…". */
+export const keys = (label: string): string => (isMac ? label.replace(/Ctrl\+/g, 'Cmd+') : label);
+
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   props: Partial<HTMLElementTagNameMap[K]> = {},

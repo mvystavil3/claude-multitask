@@ -7,6 +7,7 @@ import { appRoot, configPath, loadConfig, toConfigWorkspace } from './config.js'
 import { Manager } from './manager.js';
 import { getTheme } from '../shared/themes.js';
 import { setDockerfileDir } from './docker.js';
+import { adoptLoginShellPath } from './env.js';
 
 let manager: Manager;
 let win: BrowserWindow | null = null;
@@ -117,8 +118,29 @@ function registerIpc(): void {
   });
 }
 
+/**
+ * Windows and Linux get no menu bar: every action is in the toolbar and Ctrl+K. macOS
+ * cannot go without one, because Cmd+C, Cmd+V, Cmd+Q and friends are menu accelerators
+ * there, and removing the menu removes the shortcuts.
+ */
+function installMenu(): void {
+  if (process.platform !== 'darwin') {
+    Menu.setApplicationMenu(null);
+    return;
+  }
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }]),
+  );
+}
+
+// Windows only shows toast notifications for an app with an AppUserModelID; it has to match
+// electron-builder's appId so the installed app's shortcut and the toasts line up.
+if (process.platform === 'win32') app.setAppUserModelId('com.claudemultitask.app');
+
 app.whenReady().then(async () => {
-  Menu.setApplicationMenu(null);
+  installMenu();
+  // Before anything looks up claude, docker or pwsh: see env.ts.
+  await adoptLoginShellPath();
   setDockerfileDir(
     app.isPackaged
       ? path.join(process.resourcesPath, 'docker')
@@ -168,7 +190,14 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => app.quit());
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  // Cmd+Q on macOS quits without closing the window first, which would skip the "terminals
+  // are still running" question. Route it through the window's close handler instead.
+  if (!quitting && win && !win.isDestroyed() && manager?.hasLiveSessions()) {
+    event.preventDefault();
+    win.close();
+    return;
+  }
   quitting = true;
   watcher?.close();
   void manager?.disposeAll();

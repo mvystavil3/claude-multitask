@@ -1,15 +1,15 @@
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { accessSync, constants, statSync } from 'node:fs';
 import { execFile } from 'node:child_process';
+import { PROFILES, profileAvailable } from '../shared/types.js';
 import type { ProfileId, ResolvedPane, SpawnSpec } from '../shared/types.js';
 import {
-  claudeMounts,
+  buildRunArgs,
   containerExists,
   dockerStatus,
   imageExists,
   listRunningContainers,
   removeContainer,
-  toMountPath,
 } from './docker.js';
 
 /** Argv assembled by the docker profile's prepare step, consumed by its buildSpawn. */
@@ -19,7 +19,7 @@ const dockerWarnings = new Map<string, string>();
 export interface ShellProfile {
   id: ProfileId;
   label: string;
-  /** False for profiles registered but not usable in this build. */
+  /** False when this shell does not exist on the current platform (cmd on macOS, say). */
   enabled: boolean;
   /**
    * Async work needed before the PTY exists — checking an image is present, clearing a
@@ -46,16 +46,33 @@ export interface ShellProfile {
   newline: string;
 }
 
+const isWindows = process.platform === 'win32';
+
 function which(exe: string): string | null {
   const dirs = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
-  const exts = (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';').filter(Boolean);
+  // Windows resolves a bare name only through PATHEXT; the extensionless `claude` that npm
+  // writes next to claude.cmd is a POSIX script Windows cannot run. Elsewhere the file must
+  // be executable, not merely exist.
+  const exts = isWindows
+    ? (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+    : [''];
   for (const dir of dirs) {
-    for (const ext of ['', ...exts]) {
+    for (const ext of exts) {
       const candidate = path.join(dir, exe + ext);
-      if (existsSync(candidate)) return candidate;
+      if (isRunnable(candidate)) return candidate;
     }
   }
   return null;
+}
+
+function isRunnable(file: string): boolean {
+  try {
+    if (!statSync(file).isFile()) return false;
+    if (!isWindows) accessSync(file, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function findPwsh(): string | null {
@@ -67,6 +84,7 @@ export function findClaude(): string | null {
 }
 
 export function listWslDistros(): Promise<string[]> {
+  if (!isWindows) return Promise.resolve([]);
   return new Promise((resolve) => {
     execFile(
       'wsl.exe',
@@ -108,6 +126,26 @@ function shellQuoteWin(s: string): string {
 }
 
 /**
+ * PowerShell: single quotes are fully literal (no `$var`, no backtick escapes), so a path
+ * like C:\Users\$ally\ or an argument with @ or { } survives. A ' is doubled.
+ */
+function shellQuotePwsh(s: string): string {
+  return /^[A-Za-z0-9_\-./:\\=]+$/.test(s) ? s : "'" + s.split("'").join("''") + "'";
+}
+
+/**
+ * npm installs Claude Code as claude.ps1 next to claude.cmd, and PowerShell prefers the
+ * .ps1 — which the default execution policy (Restricted / RemoteSigned on a fresh
+ * Windows) refuses to run. Name the .cmd explicitly when that is what PATH resolves to;
+ * the native installer's claude.exe, and every non-Windows install, stays plain `claude`.
+ */
+function powershellClaudeBin(): string {
+  if (!isWindows) return 'claude';
+  const found = findClaude();
+  return found && /\.cmd$/i.test(found) ? 'claude.cmd' : 'claude';
+}
+
+/**
  * Variables Claude Code sets for a nested session. Each pane must look like a fresh
  * top-level session, otherwise transcripts are disabled and hooks misbehave.
  */
@@ -140,7 +178,7 @@ function claudeFlags(pane: ResolvedPane, settingsShellPath?: string): string[] {
 const cmdProfile: ShellProfile = {
   id: 'cmd',
   label: 'Windows cmd',
-  enabled: true,
+  enabled: isWindows,
   newline: '\r',
   buildSpawn: (pane, ws) => ({
     file: process.env.COMSPEC ?? 'cmd.exe',
@@ -160,7 +198,13 @@ const powershellProfile: ShellProfile = {
   newline: '\r',
   buildSpawn: (pane, ws) => {
     const exe = findPwsh();
-    if (!exe) throw new Error('Neither pwsh.exe nor powershell.exe was found on PATH.');
+    if (!exe) {
+      throw new Error(
+        isWindows
+          ? 'Neither pwsh.exe nor powershell.exe was found on PATH.'
+          : 'pwsh was not found on PATH. Install PowerShell, or use the login shell profile.',
+      );
+    }
     return {
       file: exe,
       args: ['-NoLogo', '-NoExit'],
@@ -170,18 +214,17 @@ const powershellProfile: ShellProfile = {
   },
   shellPath: (_pane, hostPath) => winPath(hostPath),
   claudeCommand: (pane, settings) => {
-    const bin = pane.claudeBin ?? 'claude';
-    const flags = claudeFlags(pane, settings).map(shellQuoteWin).join(' ');
-    // The call operator lets PowerShell run a quoted executable path.
-    const head = /\s/.test(bin) ? `& ${shellQuoteWin(bin)}` : bin;
-    return `${head} ${flags}`.trim();
+    const bin = pane.claudeBin ?? powershellClaudeBin();
+    const flags = claudeFlags(pane, settings).map(shellQuotePwsh).join(' ');
+    // The call operator runs a quoted path; it is harmless on a bare name too.
+    return `& ${shellQuotePwsh(bin)} ${flags}`.trim();
   },
 };
 
 const wslProfile: ShellProfile = {
   id: 'wsl',
-  label: 'WSL (Ubuntu)',
-  enabled: true,
+  label: 'WSL',
+  enabled: isWindows,
   newline: '\r',
   buildSpawn: (pane, ws) => {
     const args = ['--cd', toWslPath(ws)];
@@ -199,6 +242,27 @@ const wslProfile: ShellProfile = {
     };
   },
   shellPath: (_pane, hostPath) => toWslPath(hostPath),
+  claudeCommand: (pane, settings) =>
+    [pane.claudeBin ?? 'claude', ...claudeFlags(pane, settings)].map(shellQuotePosix).join(' '),
+};
+
+/**
+ * The user's own shell on macOS and Linux: $SHELL as a login shell, so PATH additions
+ * from .zprofile / .bash_profile (where npm's global bin usually lands) are in effect and
+ * `claude` is found the same way it is in a normal terminal.
+ */
+const posixProfile: ShellProfile = {
+  id: 'posix',
+  label: 'Login shell ($SHELL)',
+  enabled: !isWindows,
+  newline: '\r',
+  buildSpawn: (pane, ws) => ({
+    file: process.env.SHELL || (process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash'),
+    args: ['-l'],
+    cwd: ws,
+    env: { ...baseEnv(pane.env), COLORTERM: 'truecolor' },
+  }),
+  shellPath: (_pane, hostPath) => path.resolve(hostPath),
   claudeCommand: (pane, settings) =>
     [pane.claudeBin ?? 'claude', ...claudeFlags(pane, settings)].map(shellQuotePosix).join(' '),
 };
@@ -251,31 +315,10 @@ const dockerProfile: ShellProfile = {
     // A hard kill can leave the previous container behind and its name is taken.
     if (await containerExists(d.containerName)) await removeContainer(d.containerName);
 
-    const mounts = await claudeMounts(pane, ws);
-    if (mounts.warning) dockerWarnings.set(pane.id, mounts.warning);
+    const run = await buildRunArgs(pane, ws);
+    if (run.warning) dockerWarnings.set(pane.id, run.warning);
     else dockerWarnings.delete(pane.id);
-
-    const args = [
-      'run',
-      '-it',
-      '--rm',
-      '--name',
-      d.containerName,
-      '-v',
-      `${toMountPath(ws)}:${d.workdir}`,
-      '-w',
-      d.workdir,
-      ...mounts.args,
-    ];
-    if (d.user) args.push('--user', d.user);
-    // `-e KEY` with no value forwards it from the docker CLI's own environment, which
-    // keeps tokens out of the command line and out of `docker inspect`.
-    for (const key of Object.keys(pane.env)) args.push('-e', key);
-    if (d.claudeConfigMode === 'none' && process.env.ANTHROPIC_API_KEY) {
-      args.push('-e', 'ANTHROPIC_API_KEY');
-    }
-    args.push(...d.extraArgs, d.image, ...d.shell);
-    dockerArgsCache.set(pane.id, args);
+    dockerArgsCache.set(pane.id, run.args);
   },
   buildSpawn: (pane, ws) => {
     const args = dockerArgsCache.get(pane.id);
@@ -305,6 +348,7 @@ const registry: Record<ProfileId, ShellProfile> = {
   powershell: powershellProfile,
   wsl: wslProfile,
   docker: dockerProfile,
+  posix: posixProfile,
 };
 
 export function getProfile(id: ProfileId): ShellProfile {
@@ -313,4 +357,12 @@ export function getProfile(id: ProfileId): ShellProfile {
   return p;
 }
 
-export const allProfiles = Object.values(registry);
+/** Why a pane's shell cannot run on this machine, or null when it can. */
+export function unavailableReason(id: ProfileId): string | null {
+  if (profileAvailable(id, process.platform)) return null;
+  const label = PROFILES.find((p) => p.id === id)?.label ?? id;
+  return (
+    `The "${label}" shell does not exist on this platform (${process.platform}). ` +
+    'Pick another shell for this pane in Settings.'
+  );
+}

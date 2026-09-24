@@ -15,7 +15,8 @@ const pane: ResolvedPane = {
   id: 'smoke-' + profile,
   title: 'smoke',
   profile,
-  distro: profile === 'wsl' ? 'Ubuntu-24.04' : undefined,
+  // Unset means WSL's own default distro, which every WSL install has.
+  distro: profile === 'wsl' ? process.env.SMOKE_DISTRO || undefined : undefined,
   workspace: ws,
   task,
   launch: (process.env.SMOKE_LAUNCH as 'claude' | 'command' | 'shell') || 'claude',

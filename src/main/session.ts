@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 import type { IPty } from 'node-pty';
 import type { PaneState, PaneStatus, ResolvedPane } from '../shared/types.js';
-import { getProfile, type ShellProfile } from './profiles.js';
+import { getProfile, unavailableReason, type ShellProfile } from './profiles.js';
 import { EventTail, eventsPath, prepareHooks, settingsPath } from './hooks.js';
 import type { HookEvent, PaneActivity } from '../shared/types.js';
 
@@ -70,6 +70,19 @@ interface WaitOptions {
   quietMs?: number;
   /** With `ready`: output this quiet counts as ready even without a match. */
   fallbackQuietMs?: number;
+  /** Also stops the wait with `failed`, for conditions a pattern cannot express. */
+  failWhen?: () => boolean;
+}
+
+/** How long the shell's prompt must sit unchanged before it counts as having come back. */
+const PROMPT_RETURN_QUIET_MS = 1_500;
+/** How much of the end of the prompt identifies it. */
+const PROMPT_TAIL_CHARS = 24;
+
+/** The last non-blank line of stripped output, compacted: the shell's prompt at a prompt. */
+function lastLine(text: string): string {
+  const lines = text.split(/[\r\n]+/).filter((l) => l.trim());
+  return compact(lines[lines.length - 1] ?? '');
 }
 
 export interface SessionEvents {
@@ -81,8 +94,37 @@ export interface SessionEvents {
 function stripAnsi(s: string): string {
   return s
     .replace(/\u001b\][^\u0007\u001b]*(\u0007|\u001b\\)/g, '')
+    // ConPTY starts new lines by moving the cursor (ESC[row;colH), not with a newline;
+    // keep the line break so "the last line" means what is on screen.
+    .replace(/\u001b\[\d*(;\d*)?[Hf]/g, '\n')
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\u001b[@-Z\\-_]/g, '');
+}
+
+/**
+ * `pid` and all its descendants, leaves first, from one `ps` snapshot. POSIX only; an
+ * unreadable process table degrades to just `pid`.
+ */
+function processTree(pid: number): Promise<number[]> {
+  return new Promise((resolve) => {
+    execFile('ps', ['-A', '-o', 'pid=,ppid='], (err, stdout) => {
+      const children = new Map<number, number[]>();
+      if (!err) {
+        for (const line of stdout.split('\n')) {
+          const [child, parent] = line.trim().split(/\s+/).map(Number);
+          if (!child || !parent) continue;
+          children.set(parent, [...(children.get(parent) ?? []), child]);
+        }
+      }
+      const tree: number[] = [];
+      const visit = (p: number) => {
+        for (const c of children.get(p) ?? []) visit(c);
+        tree.push(p);
+      };
+      visit(pid);
+      resolve(tree);
+    });
+  });
 }
 
 export class Session {
@@ -224,6 +266,12 @@ export class Session {
 
     let spawned: IPty;
     const profile = getProfile(this.pane.profile);
+    // A config copied from another OS can name a shell this machine does not have.
+    const unavailable = unavailableReason(this.pane.profile);
+    if (unavailable) {
+      this.fail('error', unavailable);
+      return;
+    }
     try {
       await mkdir(path.join(this.workspace, '.multitask'), { recursive: true });
       this.log = await open(path.join(this.workspace, '.multitask', 'session.log'), 'a');
@@ -306,7 +354,7 @@ export class Session {
       const timer = setInterval(() => {
         if (!this.proc || this.disposed) return finish('timeout');
         const text = compact(this.tail);
-        if (opts.fail?.test(text)) return finish('failed');
+        if (opts.fail?.test(text) || opts.failWhen?.()) return finish('failed');
         const quiet = opts.quietMs === undefined || quietFor(opts.quietMs);
         if (opts.ready) {
           if (opts.ready.test(text) && quiet) return finish('ready');
@@ -364,6 +412,12 @@ export class Session {
       return;
     }
     this.setState({ status: 'shell-ready' });
+    // Remembered so a command that ends straight away can be recognised by the prompt
+    // reappearing. Error text is localised ("wird nicht als interner oder externer Befehl"),
+    // the shell's own prompt is not.
+    // Only its end is compared: shells and line editors sometimes repaint the start of the
+    // line, but the text right before the cursor (`…\project>`, `…:~/x$`) stays put.
+    const prompt = lastLine(this.tail).slice(-PROMPT_TAIL_CHARS);
 
     // 'shell' means the pane is just a terminal: type nothing, let the user drive.
     if (this.pane.launch === 'shell') {
@@ -404,6 +458,13 @@ export class Session {
           ready: CLAUDE_TUI,
           // Either failure mode must stop the launch before the task is typed anywhere.
           fail: new RegExp(`${CLAUDE_MISSING.source}|${CLAUDE_SETUP.source}`),
+          // Claude never hands the terminal back while it is starting, so a prompt that
+          // returns and stays means the command ended, whatever language it failed in.
+          // Very short prompts ("$") are too ambiguous to go on.
+          failWhen: () =>
+            prompt.length >= 2 &&
+            Date.now() - this.lastDataAt >= PROMPT_RETURN_QUIET_MS &&
+            compact(this.tail).endsWith(prompt),
         })
       : await this.waitForReady({
           timeoutMs: COMMAND_TIMEOUT_MS,
@@ -523,6 +584,9 @@ export class Session {
     const proc = this.proc;
     if (!proc) return;
     const pid = proc.pid;
+    // On POSIX the shell's children are reparented to init the moment it exits, after which
+    // they can no longer be found from its pid, so the tree is read before anything dies.
+    const tree = process.platform === 'win32' ? null : await processTree(pid);
 
     const exited = new Promise<void>((resolve) => {
       const sub = proc.onExit(() => {
@@ -536,13 +600,20 @@ export class Session {
       /* already gone */
     }
     if (!hard) await Promise.race([exited, new Promise((r) => setTimeout(r, 2000))]);
-    // Always sweep the tree: killing the shell leaves claude and its node child alive.
-    this.killTree(pid);
-  }
-
-  /** ConPTY leaves grandchildren (claude, node) behind; taskkill /T clears the tree. */
-  private killTree(pid: number): void {
-    execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => {});
+    // Always sweep the tree: killing the shell does not reliably take claude and its node
+    // child with it. ConPTY leaves them running on Windows, and on POSIX an interactive
+    // shell puts each job in its own process group, out of reach of the shell's hangup.
+    if (tree) {
+      for (const p of tree) {
+        try {
+          process.kill(p, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      }
+    } else {
+      execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => {});
+    }
   }
 
   /** Forget the remembered conversation, so the next start is a fresh session. */

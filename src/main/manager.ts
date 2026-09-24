@@ -99,6 +99,7 @@ export class Manager {
   async preflight(): Promise<Preflight> {
     const [wslDistros, docker] = await Promise.all([listWslDistros(), dockerStatus()]);
     return {
+      platform: process.platform,
       claudeOnPath: findClaude(),
       pwshOnPath: findPwsh(),
       wslDistros,

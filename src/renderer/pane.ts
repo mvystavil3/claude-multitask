@@ -4,6 +4,7 @@ import { SearchAddon } from '@xterm/addon-search';
 import { WebglAddon } from '@xterm/addon-webgl';
 import type { PaneState, ResolvedPane } from '../shared/types.js';
 import { getTheme } from '../shared/themes.js';
+import { isMac, keyIs, keys } from './dom.js';
 
 const ACTIVITY_LABEL: Record<PaneState['activity'], string> = {
   unknown: '',
@@ -64,7 +65,8 @@ export class PaneView {
 
     this.term = new Terminal({
       fontSize,
-      fontFamily: 'Cascadia Mono, Consolas, "Courier New", monospace',
+      fontFamily:
+        '"Cascadia Mono", Consolas, Menlo, "SF Mono", "DejaVu Sans Mono", "Ubuntu Mono", monospace',
       theme: getTheme(pane.theme).palette,
       cursorBlink: true,
       scrollback: 10_000,
@@ -129,8 +131,9 @@ export class PaneView {
    */
   private installClipboard(body: HTMLElement): void {
     this.term.attachCustomKeyEventHandler((e) => {
-      if (e.type !== 'keydown' || !e.ctrlKey) return true;
-      const key = e.key.toLowerCase();
+      if (e.type !== 'keydown') return true;
+      // keyIs matches on any keyboard layout; see dom.ts.
+      const is = (letter: string) => keyIs(e, letter);
 
       /*
        * Returning false only tells xterm to keep its hands off the key; Chromium still
@@ -144,14 +147,28 @@ export class PaneView {
         return false;
       };
 
-      if (e.shiftKey && key === 'c') return handled(() => void this.copySelection());
-      if (!e.shiftKey && key === 'v') return handled(() => void this.pasteClipboard());
-      if (!e.shiftKey && key === 'c' && this.term.hasSelection()) {
+      // macOS: Cmd is the app's key and Ctrl is entirely the terminal's, so Ctrl+C is always
+      // an interrupt. Cmd+C and Cmd+V come from the Edit menu, whose copy and paste events
+      // xterm already handles; xterm just has to leave the keystroke itself alone.
+      if (isMac) {
+        if (!e.metaKey || e.altKey) return true;
+        if (is('c') || is('v')) return false;
+        if (is('a')) return handled(() => this.term.selectAll());
+        if (is('f')) return handled(() => this.toggleSearch(true));
+        return true;
+      }
+
+      // AltGr arrives as Ctrl+Alt and types characters (Polish AltGr+C is "ć"), so any
+      // Alt combination belongs to the program.
+      if (!e.ctrlKey || e.altKey) return true;
+      if (e.shiftKey && is('c')) return handled(() => void this.copySelection());
+      if (!e.shiftKey && is('v')) return handled(() => void this.pasteClipboard());
+      if (!e.shiftKey && is('c') && this.term.hasSelection()) {
         return handled(() => void this.copySelection());
       }
-      if (e.shiftKey && key === 'a') return handled(() => this.term.selectAll());
+      if (e.shiftKey && is('a')) return handled(() => this.term.selectAll());
       // Plain Ctrl+F stays with the program (readline's forward-char).
-      if (e.shiftKey && key === 'f') return handled(() => this.toggleSearch(true));
+      if (e.shiftKey && is('f')) return handled(() => this.toggleSearch(true));
       // Ctrl+Shift+V is left alone: Chromium delivers it as a paste event that xterm
       // already handles correctly, so intercepting it would double the text.
       return true;
@@ -218,10 +235,12 @@ export class PaneView {
     this.promptBtn = button('⏎', 'Send the task prompt to Claude now', () =>
       void window.mt.sendPrompt(this.id),
     );
-    button('⌕', 'Search this terminal (Ctrl+Shift+F)', () => this.toggleSearch());
+    button('⌕', isMac ? 'Search this terminal (Cmd+F)' : 'Search this terminal (Ctrl+Shift+F)', () =>
+      this.toggleSearch(),
+    );
     button('📁', 'Open this terminal’s folder', () => void window.mt.openWorkspace(this.id));
     button('✎', 'Edit this terminal', () => this.cb.onEdit(this.id));
-    button('⤢', 'Maximize / restore (Ctrl+Shift+M)', () => this.cb.onMaximize(this.id));
+    button('⤢', keys('Maximize / restore (Ctrl+Shift+M)'), () => this.cb.onMaximize(this.id));
 
     header.append(this.statusEl, this.titleEl, this.folderEl, this.badgeEl, spacer, actions);
 

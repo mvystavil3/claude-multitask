@@ -1,7 +1,7 @@
 # Claude Multitask
 
-A Windows 11 desktop app that runs a configurable grid of real terminals, each one running
-its own Claude Code session on its own task, in its own folder.
+A desktop app for Windows 11, macOS and Linux that runs a configurable grid of real
+terminals, each one running its own Claude Code session on its own task, in its own folder.
 
 > An unofficial community project. It is not affiliated with, endorsed by, or supported by
 > Anthropic. "Claude" and "Claude Code" are trademarks of Anthropic, PBC. You need your own
@@ -26,13 +26,19 @@ workspaces/alpha/    workspaces/beta/     ← each pane's artifacts land here
 
 ## Requirements
 
-- Windows 11 (x64)
+- Windows 11 (x64), macOS (Apple silicon or Intel) or Linux (x64)
 - Node.js 20+ and npm, to build
 - Claude Code on `PATH` (`claude`). For WSL panes, Claude Code must be installed
   *inside* the distro as well.
-- Optional: WSL2 with at least one distro, for `wsl` panes
-- Optional: Docker Desktop for Windows, for `docker` panes. Claude Code does **not** need
-  to be installed on the host for those — the container image provides it.
+- Linux only: a C++ toolchain for `npm install` (`build-essential` and `python3` on
+  Debian/Ubuntu). `node-pty` ships prebuilt binaries for Windows and macOS but compiles
+  from source on Linux.
+- Optional: WSL2 with at least one distro, for `wsl` panes (Windows)
+- Optional: Docker Desktop (or Docker Engine on Linux), for `docker` panes. Claude Code
+  does **not** need to be installed on the host for those — the container image provides it.
+
+Windows is the primary, tested platform. macOS and Linux support is newer and has not yet
+been verified on real machines; see [Platform notes](#platform-notes).
 
 ## Getting started
 
@@ -44,13 +50,15 @@ npm start          # build and run
 On first launch the app writes `multitask.config.json` next to itself with four empty
 panes. `multitask.config.example.json` shows a fuller setup you can copy over it.
 
-To produce an installer and a portable exe in `release/`:
+To produce installers in `release/`, build on the platform you are targeting:
 
 ```powershell
-npm run dist
+npm run dist:win     # NSIS installer + portable exe
+npm run dist:mac     # dmg + zip, arm64 and x64 (unsigned unless CSC_LINK is set)
+npm run dist:linux   # AppImage + deb
 ```
 
-`npm run dist` needs permission to create symbolic links, because electron-builder's
+On Windows, `npm run dist:win` needs permission to create symbolic links, because electron-builder's
 code-signing toolchain archive contains macOS symlinks. Without it the build stops after
 writing `release/win-unpacked/` with:
 
@@ -184,8 +192,14 @@ not, so a config full of nearby projects stays readable.
       .multitask/hooks.settings.json  generated; passed to claude via --settings
 ```
 
-The app root is the repo in development, and the folder next to the `.exe` when packaged,
-so the config and artifacts are always reachable without digging into `resources/`.
+The app root is the repo in development. When packaged it is the folder next to the `.exe`
+on Windows (for the portable build, the folder the portable `.exe` sits in; if you
+installed into a folder you cannot write to, such as Program Files, `%APPDATA%\Claude
+Multitask` instead), so the config
+and artifacts are reachable without digging into `resources/`. On macOS and Linux the app
+bundle is read-only, so it is the per-user data folder instead:
+`~/Library/Application Support/Claude Multitask` on macOS, `~/.config/Claude Multitask` on
+Linux. **Config file** in the toolbar opens it either way.
 
 ## Configuration
 
@@ -276,12 +290,17 @@ colour slot printed on a dark background.
 
 | Profile | How it runs |
 | --- | --- |
-| `cmd` | `cmd.exe` in the pane folder. |
-| `powershell` | `pwsh.exe` if installed, otherwise `powershell.exe`. |
-| `wsl` | `wsl.exe -d <distro> --cd <translated path>`; `D:\x` becomes `/mnt/d/x`. |
+| `posix` | macOS and Linux: your `$SHELL` as a login shell (`-l`), so `PATH` from `.zprofile` / `.bash_profile` applies. The default there. |
+| `cmd` | Windows: `cmd.exe` in the pane folder. The default on Windows. |
+| `powershell` | `pwsh` if installed, otherwise Windows PowerShell. Works on macOS/Linux with `pwsh` installed. |
+| `wsl` | Windows: `wsl.exe -d <distro> --cd <translated path>`; `D:\x` becomes `/mnt/d/x`. |
 | `docker` | A container with the pane folder bind-mounted. See below. |
 
-All four are entries in the `ShellProfile` registry in `src/main/profiles.ts`; adding a
+A shell that does not exist on the current OS is listed but disabled in Settings, and a
+pane configured with one (a config copied from another machine) reports that instead of
+starting.
+
+All five are entries in the `ShellProfile` registry in `src/main/profiles.ts`; adding a
 fifth means adding one object there and nothing else.
 
 ## Docker panes
@@ -389,6 +408,8 @@ makes sense for an `exec` pane into a container that proxies it, not for a norma
 
 ## Copy and paste
 
+Windows and Linux:
+
 | | |
 | --- | --- |
 | `Ctrl+C` | copy when there is a selection, otherwise interrupt as usual |
@@ -396,6 +417,10 @@ makes sense for an `exec` pane into a container that proxies it, not for a norma
 | `Ctrl+Shift+C` | copy the selection |
 | `Ctrl+Shift+A` | select the whole buffer |
 | right-click | copy a selection if there is one, paste if there is not |
+
+On macOS it works like Terminal.app: **Cmd+C** / **Cmd+V** copy and paste, **Cmd+A**
+selects everything, **Cmd+F** searches, and Ctrl belongs entirely to the terminal, so
+**Ctrl+C** is always an interrupt.
 
 `Ctrl+C` only copies when text is selected, so it still reaches Claude as an interrupt the
 rest of the time. Pasting goes through xterm, which wraps the text for bracketed-paste
@@ -421,20 +446,61 @@ can this machine take another pane.
 | `Ctrl+1`…`9` | focus pane N |
 | `Ctrl+Shift+M` | maximize / restore the focused pane (`Esc` also restores) |
 | `Ctrl+,` | Settings |
+| `Ctrl+Shift+F` | search the focused terminal |
+
+On macOS every `Ctrl+` shortcut in this table is `Cmd+` instead (`Cmd+K`, `Cmd+1`…`9`,
+`Cmd+Shift+M`, `Cmd+,`, `Cmd+F`), and `Cmd+Q` asks before stopping running terminals.
+
+Shortcuts work on any keyboard layout: letters follow the key you press (AZERTY, QWERTZ),
+fall back to the physical key on non-Latin layouts (Cyrillic, Greek, Hebrew), and pane
+numbers use the number row whatever it types. AltGr combinations are never taken, so
+characters such as `@`, `{` or `ć` still reach the terminal.
 
 Closing the window while terminals are running asks first, then stops every session. On
 launch the app also removes containers left behind by a previous session that was killed
 rather than closed — `docker run --rm` only fires when the container itself stops, and a
 leftover container keeps a lock on its workspace folder.
 Killing a pane sweeps the whole process tree — ConPTY otherwise leaves `claude` and its
-`node` child running after the shell exits.
+`node` child running after the shell exits, and on macOS/Linux an interactive shell runs
+each job in its own process group, out of reach of the shell's own hangup.
+
+## Platform notes
+
+- **Windows** is where the app is developed and tested, on x64 and (installer) ARM64. In
+  PowerShell panes an npm-installed Claude Code is started as `claude.cmd`, because the
+  `claude.ps1` npm also installs is blocked by the default script execution policy.
+- **Any OS, any language**: a `claude` that is missing or fails at once is recognised by
+  the shell's prompt coming back, not by the error text, so it is reported the same way on
+  a German or Japanese Windows as on an English one.
+- **macOS / Linux, launched from Finder, the Dock or a desktop menu**: such apps inherit a
+  minimal `PATH`, so on startup the app asks your login shell for its `PATH`. `claude`,
+  `docker` and `pwsh` are found wherever your terminal finds them (Homebrew, npm, `~/.local/bin`).
+- **macOS**: Claude Code keeps its login in the Keychain rather than in
+  `~/.claude/.credentials.json`. Host panes are unaffected, but a container cannot read the
+  Keychain, so docker panes in `shared` or `copy` mode start logged out. Use `none` with
+  `ANTHROPIC_API_KEY` set, or log in inside the container once (in `copy` mode that login
+  is kept in the pane's own Claude home). The dmg is unsigned unless you sign it, so
+  Gatekeeper asks you to allow it on first launch.
+- **Linux**: `npm install` compiles `node-pty`, which needs a C++ toolchain; build
+  installers on the architecture you target (x64 or ARM64). Docker Engine works as well as
+  Docker Desktop; if the pane says permission denied, add yourself to the `docker` group.
+  Containers run as **your** uid:gid by default, with a per-pane home at
+  `.multitask/home`, so files they write into your project and `~/.claude` stay yours
+  rather than root's. Set the pane's **Run as user** to `root` (or any user) when a task
+  needs to install system packages inside the container.
+- A config is portable between machines except for the shells: `cmd` and `wsl` panes
+  report that they cannot run on macOS/Linux, and `posix` panes on Windows.
 
 ## Development
 
 ```powershell
 npm run dev        # esbuild watch; re-run `npx electron .` to pick up changes
 npm run typecheck
+npm test           # unit + real-PTY tests with this OS's default shell; ~1 minute
 ```
+
+`npm test` needs neither Claude Code nor Docker and works in a temp folder, so it runs on
+any machine and in CI on all three platforms.
 
 `scripts/smoke.ts` drives a single `Session` headlessly, which is the fastest way to work
 on the launch sequence without the UI in the way:

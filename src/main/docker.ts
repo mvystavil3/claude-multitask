@@ -40,7 +40,11 @@ export async function dockerStatus(): Promise<DockerStatus> {
     return {
       cliVersion: null,
       serverVersion: null,
-      error: 'The docker command was not found on PATH. Install Docker Desktop for Windows.',
+      error:
+        'The docker command was not found on PATH. ' +
+        (process.platform === 'linux'
+          ? 'Install Docker Engine (or Docker Desktop for Linux).'
+          : `Install Docker Desktop for ${process.platform === 'darwin' ? 'Mac' : 'Windows'}.`),
       images: [],
       runningContainers: [],
     };
@@ -52,9 +56,7 @@ export async function dockerStatus(): Promise<DockerStatus> {
     return {
       cliVersion,
       serverVersion: null,
-      error:
-        'Docker is installed but its engine is not reachable. Start Docker Desktop and wait ' +
-        'for the whale icon to stop animating, then press Refresh.',
+      error: engineUnreachable(server.out),
       images: [],
       runningContainers: [],
     };
@@ -68,6 +70,27 @@ export async function dockerStatus(): Promise<DockerStatus> {
     images,
     runningContainers: containers,
   };
+}
+
+/** What to tell someone whose engine did not answer, from the CLI's own complaint. */
+function engineUnreachable(detail: string): string {
+  // Linux without Docker Desktop: the daemon is up but this user is not in the docker group.
+  if (/permission denied/i.test(detail)) {
+    return (
+      'Your user cannot reach the Docker daemon (permission denied). Add it to the docker ' +
+      'group with "sudo usermod -aG docker $USER", log out and back in, then press Refresh.'
+    );
+  }
+  if (process.platform === 'linux') {
+    return (
+      'Docker is installed but its engine is not reachable. Start it with ' +
+      '"sudo systemctl start docker" (or start Docker Desktop), then press Refresh.'
+    );
+  }
+  return (
+    'Docker is installed but its engine is not reachable. Start Docker Desktop and wait ' +
+    'for the whale icon to stop animating, then press Refresh.'
+  );
 }
 
 export async function listImages(): Promise<DockerImage[]> {
@@ -172,6 +195,14 @@ export function toMountPath(hostPath: string): string {
   return path.resolve(hostPath).split('\\').join('/');
 }
 
+/**
+ * Claude Code on macOS keeps its login in the Keychain rather than in
+ * ~/.claude/.credentials.json, and a container cannot read the Keychain.
+ */
+const MAC_KEYCHAIN_NOTE =
+  'On macOS, Claude Code keeps its login in the Keychain, which a container cannot read. ' +
+  'Use credentials mode "none" with ANTHROPIC_API_KEY set, or log in inside the container.';
+
 export interface ClaudeMounts {
   args: string[];
   warning?: string;
@@ -241,6 +272,9 @@ export async function claudeMounts(pane: ResolvedPane, workspace: string): Promi
       return { args: [], warning: `No Claude config found at ${hostClaudeDir}.` };
     }
     args.push('-v', `${toMountPath(hostClaudeDir)}:${d.claudeHome}`);
+    if (process.platform === 'darwin' && !existsSync(path.join(hostClaudeDir, '.credentials.json'))) {
+      warning = MAC_KEYCHAIN_NOTE;
+    }
   } else {
     const paneHome = path.join(workspace, '.multitask', 'claude-home');
     await mkdir(paneHome, { recursive: true });
@@ -251,7 +285,9 @@ export async function claudeMounts(pane: ResolvedPane, workspace: string): Promi
     }
     if (!existsSync(path.join(paneHome, '.credentials.json'))) {
       warning =
-        'No credentials were found to seed this pane\u2019s Claude home; Claude may ask you to log in inside the container.';
+        process.platform === 'darwin'
+          ? MAC_KEYCHAIN_NOTE
+          : 'No credentials were found to seed this pane\u2019s Claude home; Claude may ask you to log in inside the container.';
     }
     args.push('-v', `${toMountPath(paneHome)}:${d.claudeHome}`);
   }
@@ -259,4 +295,79 @@ export async function claudeMounts(pane: ResolvedPane, workspace: string): Promi
   const paneJson = await preparePaneConfig(workspace, d.workdir);
   args.push('-v', `${toMountPath(paneJson)}:${containerHome}/.claude.json`);
   return { args, warning };
+}
+
+/** Claude's home inside the container when nothing else is configured. */
+export const DEFAULT_CLAUDE_HOME = '/root/.claude';
+/** The home a container gets when it runs as the host user; see hostUser. */
+const MAPPED_HOME = '/home/multitask';
+
+/**
+ * The uid:gid to run a Linux container as, or null to leave the image's own user.
+ *
+ * On Linux a bind mount has no ownership translation: whatever the container writes into
+ * the pane's folder, or into a shared ~/.claude, belongs to the uid it ran as — root by
+ * default — and the user then cannot edit or delete their own project files without sudo.
+ * Docker Desktop on macOS and Windows translates ownership itself, so this is Linux only.
+ * A pane that sets its own user (including "root" or "0") opts out.
+ */
+function hostUser(pane: ResolvedPane): string | null {
+  if (process.platform !== 'linux' || pane.docker.user) return null;
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  if (uid === undefined || gid === undefined || uid === 0) return null;
+  return `${uid}:${gid}`;
+}
+
+/**
+ * The full `docker run` argv for a pane in run mode, plus any warning to show on it. The
+ * single place this is assembled; scripts/docker-argv.ts prints it for inspection.
+ */
+export async function buildRunArgs(
+  pane: ResolvedPane,
+  workspace: string,
+): Promise<{ args: string[]; warning?: string }> {
+  let d = pane.docker;
+  const extra: string[] = [];
+
+  const user = hostUser(pane);
+  if (user) {
+    // /root is mode 700, so a non-root uid could not even reach mounts placed under it.
+    const claudeHome =
+      d.claudeHome === DEFAULT_CLAUDE_HOME ? `${MAPPED_HOME}/.claude` : d.claudeHome;
+    const home = path.posix.dirname(claudeHome);
+    // A per-pane home owned by the host user, so whatever Claude writes outside ~/.claude
+    // also lands somewhere writable. Mount points inside it are created here first,
+    // because the daemon would otherwise create them on the host as root.
+    const hostHome = path.join(workspace, '.multitask', 'home');
+    await mkdir(path.join(hostHome, path.posix.basename(claudeHome)), { recursive: true });
+    const jsonPoint = path.join(hostHome, '.claude.json');
+    if (!existsSync(jsonPoint)) await writeFile(jsonPoint, '{}', 'utf8');
+    d = { ...d, user, claudeHome };
+    extra.push('-v', `${toMountPath(hostHome)}:${home}`, '-e', `HOME=${home}`);
+  }
+
+  const mounts = await claudeMounts({ ...pane, docker: d }, workspace);
+  const args = [
+    'run',
+    '-it',
+    '--rm',
+    '--name',
+    d.containerName,
+    '-v',
+    `${toMountPath(workspace)}:${d.workdir}`,
+    '-w',
+    d.workdir,
+    ...extra,
+    ...mounts.args,
+  ];
+  if (d.user) args.push('--user', d.user);
+  // `-e KEY` with no value forwards it from the docker CLI's own environment, which
+  // keeps tokens out of the command line and out of `docker inspect`.
+  for (const key of Object.keys(pane.env)) args.push('-e', key);
+  if (d.claudeConfigMode === 'none' && process.env.ANTHROPIC_API_KEY) {
+    args.push('-e', 'ANTHROPIC_API_KEY');
+  }
+  args.push(...d.extraArgs, d.image, ...d.shell);
+  return { args, warning: mounts.warning };
 }

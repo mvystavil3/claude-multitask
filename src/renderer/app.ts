@@ -5,6 +5,7 @@ import { PaneView } from './pane.js';
 import { openSettings } from './settings.js';
 import { openImagesDialog } from './images.js';
 import { isPaletteOpen, openPalette, type Command } from './palette.js';
+import { digitOf, keyIs, keys, modKey } from './dom.js';
 
 import type { MtApi } from '../preload/index.js';
 
@@ -110,12 +111,12 @@ function buildToolbar(): void {
   fontBox.append(document.createTextNode('font'), fontInput);
   toolbar.append(fontBox);
 
-  button('Commands', 'Every action, searchable (Ctrl+K)', () => openPalette(buildCommands()));
+  button('Commands', keys('Every action, searchable (Ctrl+K)'), () => openPalette(buildCommands()));
   button('Config file', 'Open multitask.config.json in the default editor', () =>
     void window.mt.openConfigFile(),
   );
   button('Reload', 'Re-read the config file from disk', () => void window.mt.reloadConfig());
-  button('Settings', 'Edit terminals and defaults (Ctrl+,)', () => showSettings());
+  button('Settings', keys('Edit terminals and defaults (Ctrl+,)'), () => showSettings());
 }
 
 async function saveConfig(next: AppConfig): Promise<void> {
@@ -374,7 +375,7 @@ function buildCommands(): Command[] {
       keywords: 'attention needs',
       run: () => focusNextAttention(),
     },
-    { id: 'settings', label: 'Open settings', hint: 'Ctrl+,', run: () => showSettings() },
+    { id: 'settings', label: 'Open settings', hint: keys('Ctrl+,'), run: () => showSettings() },
     { id: 'images', label: 'Open Docker images', run: () => openImagesDialog() },
     { id: 'config', label: 'Open the config file', run: () => window.mt.openConfigFile() },
     { id: 'reload', label: 'Reload config from disk', run: () => window.mt.reloadConfig() },
@@ -450,24 +451,28 @@ function buildCommands(): Command[] {
 function registerHotkeys(): void {
   // Capture phase: a focused terminal consumes Ctrl+digit (Ctrl+3 is ESC, Ctrl+2 is NUL)
   // and stops the event, so app shortcuts registered on bubble never fire from a pane.
+  // `modKey` is Cmd on macOS, where Ctrl is left to the terminal.
   window.addEventListener(
     'keydown',
     (e) => {
       if (isPaletteOpen() || document.querySelector('.overlay')) return;
-      const key = e.key.toLowerCase();
       let action: (() => void) | null = null;
-      if (e.ctrlKey && !e.shiftKey && !e.altKey && key === 'k') {
+      // Alt is excluded throughout: AltGr arrives as Ctrl+Alt on Windows and types
+      // characters (@, {, [) on most European layouts.
+      const mod = modKey(e) && !e.altKey;
+      const digit = digitOf(e);
+      if (mod && !e.shiftKey && keyIs(e, 'k')) {
         action = () => openPalette(buildCommands());
       } else if (e.key === 'F8') {
         action = () => focusNextAttention();
-      } else if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key >= '1' && e.key <= '9') {
-        action = () => focusIndex(Number(e.key) - 1);
-      } else if (e.ctrlKey && e.shiftKey && !e.altKey && key === 'm') {
+      } else if (mod && !e.shiftKey && digit !== null) {
+        action = () => focusIndex(digit - 1);
+      } else if (mod && e.shiftKey && keyIs(e, 'm')) {
         action = () => {
           maximizedId = maximizedId === null ? focusedId : null;
           layoutGrid();
         };
-      } else if (e.ctrlKey && !e.altKey && e.key === ',') {
+      } else if (mod && (e.key === ',' || e.code === 'Comma')) {
         action = () => showSettings(focusedId ?? undefined);
       }
       if (!action) return;
@@ -518,10 +523,12 @@ async function main(): Promise<void> {
   // Only worth saying when a Windows pane actually expects to find claude on PATH.
   const needsHostClaude = snap.panes.some(
     (p) =>
-      p.launch === 'claude' && !p.claudeBin && (p.profile === 'cmd' || p.profile === 'powershell'),
+      p.launch === 'claude' &&
+      !p.claudeBin &&
+      (p.profile === 'cmd' || p.profile === 'powershell' || p.profile === 'posix'),
   );
   if (!preflight.claudeOnPath && needsHostClaude) {
-    toast('claude was not found on PATH. Windows terminals will fail until it is installed.', 'error');
+    toast('claude was not found on PATH. Host shell terminals will fail until it is installed.', 'error');
   }
 }
 

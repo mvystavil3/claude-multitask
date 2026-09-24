@@ -39,10 +39,14 @@ export function settingsPath(workspace: string): string {
  * it a plain stdin-to-stdout filter on Windows; POSIX just uses cat.
  */
 function appendCommand(pane: ResolvedPane, shellEventsPath: string): string {
-  if (pane.profile === 'cmd' || pane.profile === 'powershell') {
+  // PowerShell also runs on macOS and Linux, where Claude is a POSIX program.
+  const windowsClaude =
+    pane.profile === 'cmd' || (pane.profile === 'powershell' && process.platform === 'win32');
+  if (windowsClaude) {
     return `findstr "^" >> "${shellEventsPath}"`;
   }
-  return `cat >> '${shellEventsPath}'`;
+  // Home folders on macOS can contain a single quote, so escape it POSIX-style.
+  return `cat >> '${shellEventsPath.split("'").join("'\\''")}'`;
 }
 
 /**

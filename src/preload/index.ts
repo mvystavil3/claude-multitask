@@ -10,6 +10,8 @@ import type {
 import type { Snapshot } from '../shared/ipc.js';
 
 const api = {
+  /** 'win32', 'darwin' or 'linux'; decides shortcuts and which shells Settings offers. */
+  platform: process.platform as string,
   snapshot: (): Promise<Snapshot> => ipcRenderer.invoke(IPC.snapshot),
   preflight: (): Promise<Preflight> => ipcRenderer.invoke(IPC.preflight),
   saveConfig: (config: AppConfig): Promise<Snapshot> => ipcRenderer.invoke(IPC.saveConfig, config),

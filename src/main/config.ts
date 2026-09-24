@@ -1,8 +1,10 @@
 import { z } from 'zod';
 import { app } from 'electron';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import { defaultProfileFor } from '../shared/types.js';
+import { DEFAULT_CLAUDE_HOME } from './docker.js';
 import type {
   AppConfig,
   DockerConfig,
@@ -13,7 +15,7 @@ import type {
 import { DEFAULT_THEME_ID, PALETTE_KEYS, getTheme, setCustomThemes } from '../shared/themes.js';
 import type { TerminalPalette } from '../shared/themes.js';
 
-const profileId = z.enum(['cmd', 'powershell', 'wsl', 'docker']);
+const profileId = z.enum(['cmd', 'powershell', 'wsl', 'docker', 'posix']);
 const launchMode = z.enum(['claude', 'command', 'shell']);
 
 // Built from PALETTE_KEYS so a new colour slot cannot be forgotten here. The cast just
@@ -52,7 +54,7 @@ const DOCKER_DEFAULTS = {
   workdir: '/work',
   shell: ['bash', '-l'],
   claudeConfigMode: 'shared' as const,
-  claudeHome: '/root/.claude',
+  claudeHome: DEFAULT_CLAUDE_HOME,
   extraArgs: [] as string[],
 };
 
@@ -87,7 +89,7 @@ const configSchema = z.object({
     .default({ cols: 2, rows: 2 }),
   defaults: z
     .object({
-      profile: profileId.default('cmd'),
+      profile: profileId.default(defaultProfileFor(process.platform)),
       theme: z.string().default(DEFAULT_THEME_ID),
       launch: launchMode.default('claude'),
       command: z.string().optional(),
@@ -109,12 +111,41 @@ const configSchema = z.object({
 
 /**
  * App root: the folder holding multitask.config.json and workspaces/.
- * In dev that is the repo; when packaged it is the folder next to the .exe so the
- * user can edit config and reach artifacts without digging into resources/.
+ *
+ * - Dev: the repo.
+ * - Packaged on Windows: the folder next to the .exe, so the config and artifacts are
+ *   reachable without digging into resources/. The portable build runs from a temporary
+ *   unpack folder, so it uses the folder the portable .exe itself sits in.
+ * - Packaged on macOS/Linux: the per-user data folder. A signed .app bundle and a mounted
+ *   AppImage are both read-only, so nothing can live next to the executable.
  */
 export function appRoot(): string {
-  if (app.isPackaged) return path.dirname(app.getPath('exe'));
-  return path.resolve(__dirname, '../..');
+  if (!app.isPackaged) return path.resolve(__dirname, '../..');
+  if (process.platform !== 'win32') return app.getPath('userData');
+  cachedWinRoot ??= windowsPackagedRoot();
+  return cachedWinRoot;
+}
+
+let cachedWinRoot: string | undefined;
+
+/**
+ * Next to the .exe when that folder is usable, which is where the per-user installer and
+ * the portable build put it. The installer also lets people choose Program Files, which a
+ * normal user cannot write to, so then the config lives in the per-user data folder.
+ */
+function windowsPackagedRoot(): string {
+  const beside = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(app.getPath('exe'));
+  // An existing config wins: that is where this user already keeps their panes.
+  if (existsSync(path.join(beside, 'multitask.config.json'))) return beside;
+  const probe = path.join(beside, `.multitask-write-test-${process.pid}`);
+  try {
+    // Windows ACLs make access(W_OK) unreliable, so actually write.
+    writeFileSync(probe, '');
+    unlinkSync(probe);
+    return beside;
+  } catch {
+    return app.getPath('userData');
+  }
 }
 
 export function configPath(): string {

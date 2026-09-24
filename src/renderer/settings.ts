@@ -7,6 +7,7 @@ import type {
   Preflight,
   ProfileId,
 } from '../shared/types.js';
+import { PROFILES, profileAvailable } from '../shared/types.js';
 import { comboInput, el, field, linesToArray, numberInput, select, themeField } from './dom.js';
 import {
   DEFAULT_THEME_ID,
@@ -18,12 +19,13 @@ import {
 import { openThemeEditor } from './theme-editor.js';
 import { localImageRefs, openImagesDialog } from './images.js';
 
-const PROFILES: { id: ProfileId; label: string; enabled: boolean }[] = [
-  { id: 'cmd', label: 'Windows cmd', enabled: true },
-  { id: 'powershell', label: 'PowerShell', enabled: true },
-  { id: 'wsl', label: 'WSL (Ubuntu)', enabled: true },
-  { id: 'docker', label: 'Docker container', enabled: true },
-];
+/** Shells this machine can run are selectable; the rest stay listed but disabled. */
+const profileOptions = () =>
+  PROFILES.map((p) => ({
+    value: p.id,
+    label: profileAvailable(p.id, window.mt.platform) ? p.label : `${p.label} (not on this OS)`,
+    disabled: !profileAvailable(p.id, window.mt.platform),
+  }));
 
 const LAUNCH_MODES: { value: LaunchMode; label: string }[] = [
   { value: 'claude', label: 'Claude Code' },
@@ -105,10 +107,7 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
   const cols = numberInput(draft.grid.cols, 1, 6);
   const rows = numberInput(draft.grid.rows, 1, 6);
   const fontSize = numberInput(draft.defaults.fontSize, 8, 32);
-  const defProfile = select(
-    PROFILES.map((p) => ({ value: p.id, label: p.label, disabled: !p.enabled })),
-    draft.defaults.profile,
-  );
+  const defProfile = select(profileOptions(), draft.defaults.profile);
   const defLaunch = select(LAUNCH_MODES, draft.defaults.launch ?? 'claude');
   const defTheme = themeField('Theme', draft.defaults.theme ?? DEFAULT_THEME_ID, allThemes(), null);
 
@@ -248,7 +247,7 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
     el('p', { className: preflight?.claudeOnPath ? 'muted' : 'warn' }, [
       preflight?.claudeOnPath
         ? `claude: ${preflight.claudeOnPath}`
-        : 'claude was not found on PATH — Windows panes will fail until it is installed or claudeBin is set.',
+        : 'claude was not found on PATH — host shell panes will fail until it is installed or claudeBin is set.',
     ]),
   ]);
 
@@ -368,7 +367,7 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
     const profile = select(
       [
         { value: '', label: `inherit (${draft.defaults.profile})` },
-        ...PROFILES.map((p) => ({ value: p.id, label: p.label, disabled: !p.enabled })),
+        ...profileOptions(),
       ],
       pane.profile ?? '',
     );
@@ -448,7 +447,10 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
       value: dk.claudeHome ?? '',
       placeholder: '/root/.claude',
     });
-    const dockerUser = el('input', { value: dk.user ?? '', placeholder: 'image default' });
+    const dockerUser = el('input', {
+      value: dk.user ?? '',
+      placeholder: window.mt.platform === 'linux' ? 'you (host uid:gid)' : 'image default',
+    });
     const dockerExtra = el('textarea', {
       value: (dk.extraArgs ?? []).join('\n'),
       rows: 3,
@@ -565,7 +567,13 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
           field('Claude home in container', dockerClaudeHome, 'Depends on the image’s user.'),
         ]),
         el('div', { className: 'row' }, [
-          field('Run as user', dockerUser, 'docker run --user, e.g. 1000:1000.'),
+          field(
+            'Run as user',
+            dockerUser,
+            window.mt.platform === 'linux'
+              ? 'Blank runs as you, so files stay yours. "root" to install packages.'
+              : 'docker run --user, e.g. 1000:1000. Blank uses the image’s user.',
+          ),
           field('Extra docker arguments', dockerExtra, 'One per line.'),
         ]),
         ...(dockerClaudeMode.value === 'shared'

@@ -6,13 +6,18 @@
  *     --external:node-pty --external:electron --outfile=dist/docker-argv.cjs
  *   node dist/docker-argv.cjs
  */
+import { mkdtempSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { claudeMounts, toMountPath } from '../src/main/docker.js';
+import { buildRunArgs } from '../src/main/docker.js';
 import type { ClaudeConfigMode, ResolvedPane } from '../src/shared/types.js';
 
-// Bundled to dist/, so the repo root is one level up. The copy mode seeds credentials into
-// this folder's .multitask/, which .gitignore keeps out of the repo.
-const workspace = path.resolve(__dirname, '..', 'workspaces', 'argv-demo');
+// Everything happens in a throwaway folder with an empty fake home. buildRunArgs does real
+// work — `copy` mode seeds the pane's Claude home from ~/.claude — and a demo must never
+// copy the user's real credentials anywhere. os.homedir() reads these on every call.
+const scratch = mkdtempSync(path.join(os.tmpdir(), 'multitask-argv-'));
+process.env.HOME = process.env.USERPROFILE = path.join(scratch, 'home');
+const workspace = path.join(scratch, 'argv-demo');
 
 function pane(mode: ClaudeConfigMode, overrides: Partial<ResolvedPane['docker']> = {}): ResolvedPane {
   return {
@@ -40,30 +45,11 @@ function pane(mode: ClaudeConfigMode, overrides: Partial<ResolvedPane['docker']>
 }
 
 async function show(label: string, p: ResolvedPane): Promise<void> {
-  const d = p.docker;
-  const mounts = await claudeMounts(p, workspace);
-  const args = [
-    'run',
-    '-it',
-    '--rm',
-    '--name',
-    d.containerName,
-    '-v',
-    `${toMountPath(workspace)}:${d.workdir}`,
-    '-w',
-    d.workdir,
-    ...mounts.args,
-  ];
-  if (d.user) args.push('--user', d.user);
-  for (const key of Object.keys(p.env)) args.push('-e', key);
-  if (d.claudeConfigMode === 'none' && process.env.ANTHROPIC_API_KEY) {
-    args.push('-e', 'ANTHROPIC_API_KEY');
-  }
-  args.push(...d.extraArgs, d.image, ...d.shell);
-
+  // The same function a pane starts with, so what is printed is what would run.
+  const { args, warning } = await buildRunArgs(p, workspace);
   console.log(`\n### ${label}`);
   console.log('docker ' + args.join(' '));
-  if (mounts.warning) console.log('warning: ' + mounts.warning);
+  if (warning) console.log('warning: ' + warning);
 }
 
 async function main(): Promise<void> {

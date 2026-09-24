@@ -1,8 +1,9 @@
 # Claude Multitask
 
-A Windows 11 Electron app: a themed grid of real terminals (ConPTY via `node-pty`), each
-pane running its own Claude Code session — or any command, or a bare shell — on its own
-task in its own folder. Shells: `cmd`, `powershell`, `wsl`, `docker`. The point is to run
+An Electron app for Windows 11 (primary), macOS and Linux: a themed grid of real terminals
+(`node-pty`; ConPTY on Windows), each pane running its own Claude Code session — or any
+command, or a bare shell — on its own task in its own folder. Shells: `cmd`, `powershell`,
+`wsl`, `docker`, and `posix` (the user's `$SHELL`, macOS/Linux). The point is to run
 several agents in parallel without having to watch them: each pane reports what its Claude
 session is doing (from Claude Code's hook events), and the app surfaces the one that needs
 you.
@@ -16,14 +17,21 @@ npm install            # node_modules must be complete; esbuild/xterm/zod are de
 npm run build          # esbuild -> dist/ (main, preload, renderer)
 npm start              # build + launch Electron
 npm run dev            # esbuild watch; relaunch `npx electron .` to pick up main changes
-npm run typecheck      # tsc --noEmit, strict, noUnused*
+npm run typecheck      # tsc --noEmit, strict, noUnused* (src only; scripts are checked by bundling)
+npm test               # scripts/test.ts: unit + real-PTY tests, any OS, no Claude/Docker needed
 npm run check:themes   # contrast audit of every built-in theme; must exit 0
 npm run smoke          # bundles scripts/smoke.ts -> dist/smoke.cjs
 ```
 
-Definition of done for any change: `typecheck` clean, `build` clean, `check:themes` passes
-if themes/chrome were touched, and a smoke run for any change to the launch sequence,
-profiles, hooks or docker (see Testing).
+Definition of done for any change: `typecheck` clean, `build` clean, `npm test` passes,
+`check:themes` passes if themes/chrome were touched, and a real-Claude smoke run for any
+change to the launch sequence, profiles, hooks or docker (see Testing). New platform- or
+user-dependent logic gets a test in `scripts/test.ts`.
+
+**Target: it works for any user on any supported platform** — Windows x64/ARM64, macOS
+arm64/x64, Linux x64/ARM64, any keyboard layout, any system language, any install
+location, usernames and paths with spaces, `$` or quotes. Never assume this machine: no
+hard-coded paths, distros, usernames or English-only error text.
 
 ## Architecture
 
@@ -81,8 +89,34 @@ mounts). `Stop` → `needs-you`. The session id from events drives `--resume`.
   leave the pane `running` with a `message` and let ⏎ / auto-continue handle it.
 - A pane in `error` has ⏎ disabled. Use `error` only when the pane can't reach its program;
   a live, recoverable pane is `running` + `message`.
-- Killing a pane must sweep the process tree (`taskkill /T /F`); ConPTY leaves `claude`
-  and `node` orphans otherwise.
+- Killing a pane must sweep the process tree: `taskkill /T /F` on Windows (ConPTY leaves
+  `claude` and `node` orphans), and on POSIX a `ps` snapshot taken *before* the shell dies
+  (its children are reparented to init the moment it exits). See `Session.stop`.
+- Platform checks go through `PROFILES` / `profileAvailable` in `shared/types.ts`, so main
+  and the settings dialog agree. A shell missing on this OS fails with a message; never
+  let it reach `pty.spawn`.
+- On macOS, app shortcuts use Cmd (`modKey`, `keys()` in `renderer/dom.ts`) and Ctrl is
+  entirely the terminal's. Never bind a Ctrl shortcut on macOS; write shortcut labels as
+  `keys('Ctrl+…')` so they read correctly on each OS.
+- Match shortcut keys with `keyIs(e, 'k')` / `digitOf(e)` from `dom.ts`, never raw
+  `e.key` (AZERTY digits, Cyrillic letters), and never take an Alt combination (AltGr is
+  Ctrl+Alt on Windows and types characters).
+- Don't detect failures by English text alone. The launch sequence treats the shell's own
+  prompt reappearing (`failWhen` in `runLaunchSequence`) as "the command ended"; the
+  English patterns are only a faster path.
+- macOS/Linux: `adoptLoginShellPath()` (`main/env.ts`) runs before anything looks up an
+  executable; GUI-launched apps otherwise have a bare `PATH`. Resolve executables with
+  `which()` in `profiles.ts`, which honours PATHEXT on Windows and the executable bit
+  elsewhere.
+- Quote per shell: `shellQuoteWin` (cmd), `shellQuotePwsh` (single quotes, `$` literal),
+  `shellQuotePosix`. PowerShell starts npm installs as `claude.cmd`, since `claude.ps1`
+  is blocked by the default execution policy.
+- Packaged builds keep config and `workspaces/` in `appRoot()`: next to the exe on Windows
+  (`PORTABLE_EXECUTABLE_DIR` for the portable build; `userData` if that folder is not
+  writable, e.g. Program Files), `userData` on macOS/Linux, where the bundle is read-only.
+- `docker run` argv is built only in `buildRunArgs` (`main/docker.ts`). On Linux it runs
+  the container as the host uid:gid with a per-pane home, so nothing in the user's project
+  or `~/.claude` becomes root-owned; a pane's explicit `user` opts out.
 - Secrets reach containers only as bare `-e KEY` flags, never `KEY=value` in argv.
 - Docker panes get their own `.claude.json` (never write the host's), with the mount point
   pre-trusted.
@@ -104,9 +138,10 @@ mounts). `Stop` → `needs-you`. The session id from events drives `--resume`.
 
 **A shell profile** — one object in the `registry` in `main/profiles.ts` implementing
 `ShellProfile` (`buildSpawn`, `shellPath`, `claudeCommand`, `newline`; optional `prepare`,
-`cleanup`, `warningFor`, `hooksReachable`). Then add the id to `ProfileId`, the zod
-`profileId` enum, `PROFILES` in `settings.ts`, `appendCommand` in `hooks.ts` if its hook
-shell differs, and the README Shells table. Quote with `shellQuoteWin` / `shellQuotePosix`.
+`cleanup`, `warningFor`, `hooksReachable`; set `enabled` for the platforms it exists on).
+Then add the id to `ProfileId` and to `PROFILES` (with `platforms`) in `shared/types.ts`,
+the zod `profileId` enum in `config.ts`, `appendCommand` in `hooks.ts` if Claude runs
+somewhere its hook shell differs, and the README Shells table. Quote with `shellQuoteWin` / `shellQuotePosix`.
 
 **An IPC call** — channel name in `shared/ipc.ts` → `handle(...)` in `main/index.ts` →
 method on `Manager` → typed wrapper in `preload/index.ts`. Errors thrown in a handler are
@@ -127,6 +162,13 @@ it in README Controls.
 
 ## Testing
 
+`npm test` (`scripts/test.ts`, `node:test`) is the portable suite: quoting per shell, WSL
+path translation, hook commands, docker argv (secrets, Linux user mapping), and real PTY
+sessions with this OS's default shell — a command runs after the prompt, a missing
+`claude` is reported, a command that returns to the prompt counts as failed, stop ends
+the shell. It needs no Claude Code, Docker or network, so it is what CI should run on
+Windows, macOS and Linux. Tests use `os.tmpdir()`, never `workspaces/`.
+
 `scripts/smoke.ts` drives one `Session` headlessly, which is the fastest loop for launch
 sequence work:
 
@@ -137,7 +179,7 @@ SMOKE_WORKSPACE=dist/smoke-ws node dist/smoke.cjs cmd "Reply PONG. No tools." 60
 ```
 
 - Args: profile, task, time limit (s). Env: `SMOKE_LAUNCH`, `SMOKE_COMMAND`,
-  `SMOKE_CLAUDE_BIN`, `SMOKE_CLAUDE_ARGS`, `SMOKE_IMAGE`, `SMOKE_DOCKER_MODE`,
+  `SMOKE_CLAUDE_BIN`, `SMOKE_CLAUDE_ARGS`, `SMOKE_DISTRO`, `SMOKE_IMAGE`, `SMOKE_DOCKER_MODE`,
   `SMOKE_CONTAINER`, `SMOKE_CLAUDE_MODE`, `SMOKE_CLAUDE_HOME`.
 - A folder outside a trusted tree shows Claude's trust dialog. `dist/` under the repo
   inherits the repo's trust; don't accept trust dialogs in temp folders (that writes to
@@ -152,14 +194,36 @@ SMOKE_WORKSPACE=dist/smoke-ws node dist/smoke.cjs cmd "Reply PONG. No tools." 60
 
 ## Environment notes
 
-- Windows only (ConPTY, `taskkill`, `COMSPEC`, `wsl.exe`). Paths in config may be relative
-  to the app root (repo in dev, exe folder when packaged) or absolute.
-- `node-pty` uses N-API prebuilds; no electron-rebuild or Visual Studio needed.
+- Developed and tested on Windows. The macOS/Linux code paths (`posix` shell, `ps` tree
+  kill, login-shell PATH, Cmd shortcuts, Mac menu, `userData` app root, Keychain warning,
+  Linux docker user mapping) are written but have **not** run on a real Mac or Linux
+  machine yet; treat them as unverified until `npm test` has passed there.
+- Paths in config may be relative to the app root or absolute.
+- `node-pty` uses N-API prebuilds for Windows and macOS (no electron-rebuild needed); on
+  Linux `npm install` compiles it and needs `build-essential` + `python3`.
+- Build installers on the target OS: `npm run dist:win` / `dist:mac` / `dist:linux`.
+- Working copies use CRLF (a few newer files LF); `.gitattributes` normalizes on commit.
+  When scripting edits on Windows, keep `\r`-style escapes out of shell heredocs; use the Edit
+  tool or a script file.
 - Not a git repository at present.
 
 ## Feature backlog
 
 Candidate next features, roughly by value. Confirm scope with the user before starting one.
+
+- **Finish the macOS/Linux port** (code is in; verification is not). First, a GitHub
+  Actions matrix (windows-latest, macos-latest, ubuntu-latest) running `npm ci`,
+  `typecheck`, `build`, `npm test` — that covers most of it automatically. Then by hand on
+  a real Mac and a Linux box: `npm start` launched from Finder / the app menu (login-shell
+  PATH), smoke `posix` in claude mode,
+  stop/restart leaves no `claude` process behind, Cmd+C/V/A/F and Cmd+K/1–9/Shift+M/,
+  behave, Cmd+Q asks when terminals run, packaged app writes its config to `userData`,
+  docker panes (Linux: file ownership with and without **Run as user**; macOS: Keychain
+  warning shows), `npm run dist:mac` / `dist:linux` produce working artifacts. Then:
+  a Settings "Open data folder" action for packaged builds, and mac code
+  signing/notarization if distributing.
+- **Non-English keyboard/locale QA**: `npm test` covers locale-independent failure
+  detection; AZERTY/Cyrillic shortcut handling is covered only by reasoning so far.
 
 - **Pre-trust pane folders** for cmd/powershell/wsl panes (opt-in setting), so a new pane
   doesn't stop on the trust dialog. It must not silently edit `~/.claude.json`.
@@ -174,5 +238,5 @@ Candidate next features, roughly by value. Confirm scope with the user before st
 - **Clear-on-restart option**: reset the xterm buffer when a pane restarts.
 - **Docker exec activity**: a way to reach hooks inside an existing container.
 - **SSH profile** as a fifth `ShellProfile`.
-- **Automated tests**: unit tests for `config.resolvePanes`, `compact`/readiness regexes,
-  `toWslPath`, docker argv; currently everything is verified by smoke runs.
+- **More tests**: `config.resolvePanes` (needs `electron` stubbed out of `config.ts`),
+  the hook `EventTail`, and renderer key helpers under a DOM shim.
