@@ -2,7 +2,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebglAddon } from '@xterm/addon-webgl';
-import type { PaneState, ResolvedPane } from '../shared/types.js';
+import type { PaneState, PaneUsage, ResolvedPane } from '../shared/types.js';
 import { getTheme } from '../shared/themes.js';
 import { isMac, keyIs, keys } from './dom.js';
 
@@ -18,6 +18,45 @@ const ACTIVITY_LABEL: Record<PaneState['activity'], string> = {
 function folderName(workspace: string): string {
   const parts = workspace.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? workspace;
+}
+
+/** How the pane's shell reads in its header: the profile, plus where it points. */
+function shellLabel(pane: ResolvedPane): string {
+  if (pane.profile === 'wsl') return `wsl:${pane.distro ?? 'default'}`;
+  if (pane.profile === 'ssh') return `ssh:${pane.ssh.host || '?'}`;
+  return pane.profile;
+}
+
+/** 950, 12.3k, 4.1M */
+function compactNumber(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+function formatCost(usd: number): string {
+  return usd < 0.01 ? '<$0.01' : `$${usd.toFixed(2)}`;
+}
+
+/** The short form for the header: cost when it is known, otherwise tokens. */
+function usageShort(u: PaneUsage): string {
+  if (u.costUsd !== undefined) return `≈${formatCost(u.costUsd)}`;
+  const total = u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens;
+  return `${compactNumber(total)} tok`;
+}
+
+function usageDetail(u: PaneUsage, turns: number): string {
+  const n = (v: number) => v.toLocaleString();
+  return [
+    `This conversation${u.model ? ` (${u.model})` : ''}:`,
+    `${turns} turn${turns === 1 ? '' : 's'}`,
+    `input ${n(u.inputTokens)} · output ${n(u.outputTokens)}`,
+    `cache read ${n(u.cacheReadTokens)} · cache write ${n(u.cacheWriteTokens)}`,
+    u.costUsd !== undefined
+      ? `≈ ${formatCost(u.costUsd)} at API list prices (subscriptions are not billed per token)`
+      : 'No list price known for this model, so no cost estimate.',
+    'Subagents keep their own transcripts and are not included.',
+  ].join('\n');
 }
 
 const STATUS_LABEL: Record<PaneState['status'], string> = {
@@ -52,6 +91,8 @@ export class PaneView {
   private promptBtn!: HTMLButtonElement;
   private searchBar!: HTMLInputElement;
   private lastSize = { cols: 0, rows: 0 };
+  /** Previous status, so a restart can be told apart from later updates while starting. */
+  private lastStatus: PaneState['status'] = 'idle';
   private disposed = false;
 
   constructor(pane: ResolvedPane, fontSize: number, private cb: PaneCallbacks) {
@@ -283,8 +324,7 @@ export class PaneView {
       this.applyPaneColors();
     }
     this.titleEl.textContent = pane.title;
-    this.badgeEl.textContent =
-      pane.profile === 'wsl' ? `wsl:${pane.distro ?? 'default'}` : pane.profile;
+    this.badgeEl.textContent = shellLabel(pane);
     const runs =
       pane.launch === 'command' ? pane.command : pane.launch === 'shell' ? 'shell only' : 'claude';
     this.el.title = `${pane.id}
@@ -296,6 +336,11 @@ runs: ${runs}`;
   }
 
   applyState(state: PaneState): void {
+    // A session always begins at 'spawning', and its output only follows that state.
+    const started = state.status === 'spawning' && this.lastStatus !== 'spawning';
+    if (started && this.pane.clearOnRestart) this.clear();
+    this.lastStatus = state.status;
+
     this.el.dataset.status = state.status;
     // Activity comes from Claude's own hooks and is what the attention queue reads;
     // status is about the terminal process itself.
@@ -304,9 +349,7 @@ runs: ${runs}`;
     this.statusEl.dataset.activity = state.activity;
     this.statusEl.title = ACTIVITY_LABEL[state.activity] || STATUS_LABEL[state.status];
 
-    const shell =
-      this.pane.profile === 'wsl' ? `wsl:${this.pane.distro ?? 'default'}` : this.pane.profile;
-    const bits = [shell];
+    const bits = [shellLabel(this.pane)];
     if (state.activity === 'working') {
       bits.push(state.tool ? `running ${state.tool}` : 'working');
     } else if (state.activity === 'needs-you') {
@@ -317,8 +360,10 @@ runs: ${runs}`;
       bits.push(STATUS_LABEL[state.status]);
     }
     if (state.turns > 0) bits.push(`${state.turns} turn${state.turns === 1 ? '' : 's'}`);
+    if (state.usage) bits.push(usageShort(state.usage));
     if (state.status === 'exited') bits.push(`code ${state.exitCode ?? '?'}`);
     this.badgeEl.textContent = bits.join(' · ');
+    this.badgeEl.title = state.usage ? usageDetail(state.usage, state.turns) : '';
 
     this.promptBtn.disabled = state.status !== 'running' || !this.pane.task.trim();
     this.promptBtn.classList.toggle('accent', state.status === 'running' && !state.promptSent);
@@ -328,6 +373,11 @@ runs: ${runs}`;
     this.noteEl.classList.toggle('hidden', !show);
     this.noteEl.classList.toggle('error', state.status === 'error');
     if (show) this.refit();
+  }
+
+  /** Wipe the screen and scrollback, and any modes the previous program left switched on. */
+  clear(): void {
+    if (!this.disposed) this.term.reset();
   }
 
   setFontSize(size: number): void {

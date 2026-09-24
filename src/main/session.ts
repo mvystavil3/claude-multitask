@@ -6,6 +6,7 @@ import type { PaneState, PaneStatus, ResolvedPane } from '../shared/types.js';
 import { getProfile, unavailableReason, type ShellProfile } from './profiles.js';
 import { EventTail, eventsPath, prepareHooks, settingsPath } from './hooks.js';
 import type { HookEvent, PaneActivity } from '../shared/types.js';
+import { TranscriptUsage } from './usage.js';
 
 // Required at runtime rather than imported so a missing native build surfaces as a
 // pane error instead of preventing the whole app from loading.
@@ -27,6 +28,10 @@ const COMMAND_TIMEOUT_MS = 30_000;
 /** Settle window after the TUI appears, so its first paint does not eat the keystrokes. */
 const CLAUDE_SETTLE_QUIET_MS = 500;
 const CLAUDE_SETTLE_MAX_MS = 6_000;
+/** Mid-turn transcript reads (on tool events) happen at most this often. */
+const USAGE_THROTTLE_MS = 3_000;
+/** The last message of a turn can land in the transcript just after the Stop hook runs. */
+const USAGE_SETTLE_MS = 1_500;
 
 /**
  * Stripping ANSI also removes the cursor-movement sequences that rendered the spaces
@@ -149,6 +154,11 @@ export class Session {
   private readonly eventTail: EventTail;
   /** Kept across restarts so the pane can resume its conversation. */
   private lastSessionId: string | undefined;
+  private readonly usage = new TranscriptUsage();
+  /** The transcript path as Claude reported it, before translating it to a host path. */
+  private transcriptShellPath: string | undefined;
+  private usageReadAt = 0;
+  private usageTimer: NodeJS.Timeout | null = null;
 
   constructor(
     pane: ResolvedPane,
@@ -215,6 +225,53 @@ export class Session {
     }
     if (activity) patch.activity = activity;
     this.setState(patch);
+    void this.trackUsage(event);
+  }
+
+  /**
+   * Keep the pane's token totals current from Claude's transcript. Every hook payload
+   * names the transcript; the profile translates that path to one this machine can read
+   * (a WSL or container path), or says there is none.
+   */
+  private async trackUsage(event: HookEvent): Promise<void> {
+    const reported = event.transcript_path;
+    if (reported && reported !== this.transcriptShellPath) {
+      this.transcriptShellPath = reported;
+      const profile = getProfile(this.pane.profile);
+      const host = profile.hostPath
+        ? await profile.hostPath(this.pane, reported).catch(() => null)
+        : reported;
+      // A newer transcript may have been reported while this one was being translated.
+      if (this.transcriptShellPath !== reported) return;
+      if (host) this.usage.follow(host);
+      else this.usage.clear();
+    }
+    const name = event.hook_event_name;
+    const boundary = name === 'Stop' || name === 'SessionStart' || name === 'SessionEnd';
+    if (!boundary && Date.now() - this.usageReadAt < USAGE_THROTTLE_MS) return;
+    this.refreshUsage();
+    if (name === 'Stop') {
+      if (this.usageTimer) clearTimeout(this.usageTimer);
+      this.usageTimer = setTimeout(() => this.refreshUsage(), USAGE_SETTLE_MS);
+    }
+  }
+
+  private refreshUsage(): void {
+    this.usageReadAt = Date.now();
+    void this.usage
+      .read()
+      .then((usage) => {
+        if (!usage || this.disposed) return;
+        if (JSON.stringify(usage) !== JSON.stringify(this.state.usage)) this.setState({ usage });
+      })
+      .catch(() => {});
+  }
+
+  private resetUsage(): void {
+    if (this.usageTimer) clearTimeout(this.usageTimer);
+    this.usageTimer = null;
+    this.usage.clear();
+    this.transcriptShellPath = undefined;
   }
 
   get currentState(): PaneState {
@@ -262,7 +319,9 @@ export class Session {
       tool: undefined,
       needsReason: undefined,
       turns: 0,
+      usage: undefined,
     });
+    this.resetUsage();
 
     let spawned: IPty;
     const profile = getProfile(this.pane.profile);
@@ -400,13 +459,37 @@ export class Session {
   private async runLaunchSequence(): Promise<void> {
     const profile = getProfile(this.pane.profile);
 
-    const shellReady = await this.waitForReady({
+    let shellReady = await this.waitForReady({
       timeoutMs: SHELL_TIMEOUT_MS,
       ready: SHELL_PROMPT,
       quietMs: SHELL_QUIET_MS,
-      fallbackQuietMs: SHELL_FALLBACK_QUIET_MS,
+      // A strict shell (ssh) that falls quiet without a prompt is asking something — a
+      // password, a passphrase, whether to trust a host key. That is not a prompt to type
+      // into, so it stops the wait instead of counting as ready.
+      ...(profile.strictPrompt
+        ? {
+            failWhen: () =>
+              this.sawData && Date.now() - this.lastDataAt >= SHELL_FALLBACK_QUIET_MS,
+          }
+        : { fallbackQuietMs: SHELL_FALLBACK_QUIET_MS }),
     });
     if (!this.proc || this.disposed) return;
+    if (shellReady === 'failed') {
+      // Leave it to the person at the keyboard, and carry on once a prompt shows up.
+      this.setState({
+        message:
+          'The connection is waiting for an answer (password, passphrase or host key). ' +
+          'Answer it in this pane and the launch will continue.',
+      });
+      this.tail = '';
+      shellReady = await this.waitForReady({
+        timeoutMs: CLAUDE_SETUP_WAIT_MS,
+        ready: SHELL_PROMPT,
+        quietMs: SHELL_QUIET_MS,
+      });
+      if (!this.proc || this.disposed) return;
+      if (shellReady === 'ready') this.setState({ message: profile.warningFor?.(this.pane) });
+    }
     if (shellReady !== 'ready') {
       this.fail('error', 'Shell did not produce a prompt in time.');
       return;
@@ -625,6 +708,7 @@ export class Session {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.eventTail.stop();
+    if (this.usageTimer) clearTimeout(this.usageTimer);
     await this.stop();
     await this.closeLog();
   }

@@ -140,6 +140,30 @@ file. So the state stays correct across Claude Code releases, and it works ident
 cmd, WSL and a container. A pane that sets its own `--settings` in `claudeArgs` keeps
 yours, and simply reports no activity.
 
+## Tokens and cost per pane
+
+Next to the turn count, the pane header shows what the conversation has used so far: an
+estimated cost such as `≈$0.42`, or a token count (`128k tok`) when the model has no known
+price. Hover over it for the breakdown (input, output, cache read, cache write, model).
+
+The numbers come from Claude Code's own transcript, which every hook event points at; the
+app reads it incrementally after each turn and every few seconds while Claude works. The
+cost is an estimate at Anthropic API list prices, including the cache-write and cache-read
+rates. On a Pro or Max subscription you are not billed per token, so treat it as a
+sense of scale. Subagents keep their own transcripts and are not counted. A resumed pane
+shows the whole conversation's totals, not just the part since the restart.
+
+This works wherever the app can read the transcript: cmd, PowerShell and your login shell
+directly, WSL through `\\wsl.localhost\…`, and docker `run` panes through the Claude
+home mount. ssh and docker `exec` panes have no hook events, so no counts.
+
+## Clearing the terminal on restart
+
+By default a restarted pane keeps the previous run's output above the new one. Turn on
+**Clear on restart** (per pane, or as a default) to wipe the screen and scrollback each
+time the pane starts. **Clear the terminal of …** in the command palette does it once, on
+demand.
+
 ## Keeping the conversation across a restart
 
 Restarting a pane used to throw away its context. Each pane now remembers its Claude
@@ -211,7 +235,7 @@ external edit is picked up automatically; **Reload** re-reads it on demand.
 | `grid.cols` / `grid.rows` | Visible cells. More panes than cells simply scrolls. |
 | `defaults` | Inherited by every pane that does not set the field itself. |
 | `panes[].id` | Identity and default folder name. Letters, digits, `.`, `-`, `_`. |
-| `panes[].profile` | `cmd`, `powershell`, `wsl`, or `docker` (see below). |
+| `panes[].profile` | `posix`, `cmd`, `powershell`, `wsl`, `docker` or `ssh` (see Shells). |
 | `panes[].docker` | Container settings for a `docker` pane; see Docker panes. |
 | `panes[].distro` | WSL distro name, for `wsl` panes. |
 | `panes[].workspace` | Folder this pane works in, relative to the app root or absolute. Blank means `workspaces/<id>`. |
@@ -226,6 +250,8 @@ external edit is picked up automatically; **Reload** re-reads it on demand.
 | `panes[].autoStart` | Start this pane when the app launches. |
 | `panes[].autoSubmit` | Send the task automatically, or wait for the **⏎** button. |
 | `panes[].resume` | Keep the conversation when this pane restarts. Default true. |
+| `panes[].clearOnRestart` | Wipe the terminal's screen and scrollback when the pane starts. Default false; also settable in `defaults`. |
+| `panes[].ssh` | Remote host for an `ssh` pane: `host`, `port`, `identityFile`, `remoteDir`, `extraArgs`. See SSH panes. |
 | `defaults.sound` | Play a short chime when a pane starts waiting on you. Default false. |
 
 Panes are launched with the `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION` and
@@ -295,13 +321,39 @@ colour slot printed on a dark background.
 | `powershell` | `pwsh` if installed, otherwise Windows PowerShell. Works on macOS/Linux with `pwsh` installed. |
 | `wsl` | Windows: `wsl.exe -d <distro> --cd <translated path>`; `D:\x` becomes `/mnt/d/x`. |
 | `docker` | A container with the pane folder bind-mounted. See below. |
+| `ssh` | A shell on another machine: `ssh -t <host>`, starting in `remoteDir`. See SSH panes. |
 
 A shell that does not exist on the current OS is listed but disabled in Settings, and a
 pane configured with one (a config copied from another machine) reports that instead of
 starting.
 
-All five are entries in the `ShellProfile` registry in `src/main/profiles.ts`; adding a
-fifth means adding one object there and nothing else.
+All six are entries in the `ShellProfile` registry in `src/main/profiles.ts`; adding
+another means adding one object there and nothing else.
+
+## SSH panes
+
+An `ssh` pane runs Claude Code (or a command, or nothing) on another machine. Set the host
+in Settings — `host`, `user@host` or an alias from `~/.ssh/config` — and optionally a
+port, identity file, extra ssh arguments (`-J jumphost`, `-o ServerAliveInterval=30`), and
+the remote folder to start in:
+
+```json
+{ "id": "build-box", "profile": "ssh",
+  "ssh": { "host": "ann@build.lan", "remoteDir": "~/src/api" } }
+```
+
+Sign-in is ssh's own: keys, the agent and `~/.ssh/config` work as in a normal terminal. A
+password, key passphrase or unknown-host question stops the launch and waits in the pane
+until you answer it; the app never types into it. With a remote folder or pane variables
+set, the remote side runs `cd <dir> && exec env KEY=value… "$SHELL" -l`, so the remote
+login shell must be POSIX-like (bash, zsh, sh; fish 3 works too). Pane variables are
+written into that command line, so keep secrets out of an ssh pane's environment.
+
+Claude Code must be installed on the remote host. Claude runs there, out of reach of the
+pane's local folder where hook events are written, so ssh panes show **no activity state
+or token counts** and restart without `--resume`. The local folder still holds the pane's
+`session.log`. On Windows, `ssh` comes from the OpenSSH Client optional feature (installed
+by default on current Windows 11).
 
 ## Docker panes
 

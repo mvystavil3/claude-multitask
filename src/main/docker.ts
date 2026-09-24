@@ -297,6 +297,27 @@ export async function claudeMounts(pane: ResolvedPane, workspace: string): Promi
   return { args, warning };
 }
 
+/**
+ * Map a path inside a container back to the host through the `-v host:container` flags in
+ * its argv; null when no bind mount covers it. The longest matching mount point wins, so a
+ * file mounted inside a mounted folder resolves to the file.
+ */
+export function toHostPath(args: string[], containerPath: string): string | null {
+  let best: { host: string; point: string } | null = null;
+  for (let i = 0; i < args.length - 1; i += 1) {
+    if (args[i] !== '-v' && args[i] !== '--volume') continue;
+    // host:container[:options]; the host side may itself hold a drive colon (C:/Users/…).
+    const m = /^(.+?):(\/[^:]*)(?::[\w,]+)?$/.exec(args[i + 1]);
+    if (!m) continue;
+    const [, host, point] = m;
+    const inside = containerPath === point || containerPath.startsWith(point.replace(/\/$/, '') + '/');
+    if (inside && (!best || point.length > best.point.length)) best = { host, point };
+  }
+  if (!best) return null;
+  const rest = containerPath.slice(best.point.replace(/\/$/, '').length).replace(/^\//, '');
+  return rest ? path.join(best.host, ...rest.split('/')) : path.normalize(best.host);
+}
+
 /** Claude's home inside the container when nothing else is configured. */
 export const DEFAULT_CLAUDE_HOME = '/root/.claude';
 /** The home a container gets when it runs as the host user; see hostUser. */

@@ -416,6 +416,13 @@ function buildCommands(): Command[] {
       },
       { id: `stop-${pane.id}`, label: `Stop ${name}`, hint, run: () => window.mt.stop(pane.id) },
       {
+        id: `clear-${pane.id}`,
+        label: `Clear the terminal of ${name}`,
+        hint,
+        keywords: 'reset scrollback wipe',
+        run: () => views.get(pane.id)?.clear(),
+      },
+      {
         id: `send-${pane.id}`,
         label: `Send the task to ${name}`,
         hint,

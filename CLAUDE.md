@@ -3,7 +3,8 @@
 An Electron app for Windows 11 (primary), macOS and Linux: a themed grid of real terminals
 (`node-pty`; ConPTY on Windows), each pane running its own Claude Code session — or any
 command, or a bare shell — on its own task in its own folder. Shells: `cmd`, `powershell`,
-`wsl`, `docker`, and `posix` (the user's `$SHELL`, macOS/Linux). The point is to run
+`wsl`, `docker`, `ssh` (a remote host; no hooks), and `posix` (the user's `$SHELL`,
+macOS/Linux). The point is to run
 several agents in parallel without having to watch them: each pane reports what its Claude
 session is doing (from Claude Code's hook events), and the app surfaces the one that needs
 you.
@@ -43,6 +44,7 @@ main (Node/Electron)                         renderer (browser, contextIsolation
   profiles.ts ShellProfile registry            palette.ts   Ctrl+K command palette
   docker.ts   engine/image/credential mounts   images.ts    Docker images dialog
   hooks.ts    hook settings + event tailer     theme-editor.ts, dom.ts
+  usage.ts    transcript token totals + prices
   config.ts   zod schema, resolvePanes()
   resources.ts CPU/mem sampling
 preload/index.ts  the `window.mt` bridge — the renderer's only way into main
@@ -77,6 +79,15 @@ Comes only from Claude Code hook events (`hooks.ts`), never from scraping the TU
 command appends stdin to `.multitask/events.ndjson` (`findstr "^"` on Windows shells,
 `cat` elsewhere); `EventTail` polls the file (fs.watch is unreliable through docker bind
 mounts). `Stop` → `needs-you`. The session id from events drives `--resume`.
+
+Token/cost totals (`PaneState.usage`) come from the `transcript_path` in those events,
+translated to a host path by `profile.hostPath` (WSL: `wslpath -w`; docker: the `-v`
+flags via `toHostPath`) and read incrementally by `TranscriptUsage` (`main/usage.ts`).
+Prices there are API list prices; only models with a known price get a cost.
+
+`ssh` panes set `strictPrompt`: quiet output without a prompt character means ssh is
+asking something (password, host key), so the launch waits for the user instead of
+typing.
 
 ## Invariants — do not break
 
@@ -232,11 +243,12 @@ Candidate next features, roughly by value. Confirm scope with the user before st
 - **Pane templates**: "new pane from…" presets (profile + launch + args + theme).
 - **Broadcast input**: type once into several selected panes.
 - **Session history viewer**: browse `session.log` / Claude transcripts per pane.
-- **Per-pane cost / token and turn summary** from hook or transcript data.
 - **Git awareness**: branch and dirty state in the pane header; optional worktree per pane
   so parallel agents don't collide in one repo.
-- **Clear-on-restart option**: reset the xterm buffer when a pane restarts.
 - **Docker exec activity**: a way to reach hooks inside an existing container.
-- **SSH profile** as a fifth `ShellProfile`.
+- **SSH activity**: hooks for ssh panes, e.g. a remote events file tailed over a second
+  `ssh -o BatchMode=yes` connection. The ssh profile itself has so far only been run
+  against a refused connection; verify login prompts and a remote Claude on a real server.
+- **Subagent usage**: include subagent transcripts in the per-pane token totals.
 - **More tests**: `config.resolvePanes` (needs `electron` stubbed out of `config.ts`),
   the hook `EventTail`, and renderer key helpers under a DOM shim.

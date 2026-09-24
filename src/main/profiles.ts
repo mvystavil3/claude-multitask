@@ -10,6 +10,7 @@ import {
   imageExists,
   listRunningContainers,
   removeContainer,
+  toHostPath,
 } from './docker.js';
 
 /** Argv assembled by the docker profile's prepare step, consumed by its buildSpawn. */
@@ -44,6 +45,17 @@ export interface ShellProfile {
   claudeCommand(pane: ResolvedPane, settingsShellPath?: string): string;
   /** Line ending the shell expects on the PTY. */
   newline: string;
+  /**
+   * Translate a path Claude reports (its transcript) back into one the app can read, or
+   * null when it lives somewhere the host cannot see. The path as given when absent.
+   */
+  hostPath?(pane: ResolvedPane, shellPath: string): Promise<string | null>;
+  /**
+   * The shell can stop at a question before its prompt (a password, an unknown host key),
+   * so only a real prompt character counts as ready: typing into that question would
+   * answer it.
+   */
+  strictPrompt?: boolean;
 }
 
 const isWindows = process.platform === 'win32';
@@ -175,6 +187,24 @@ function claudeFlags(pane: ResolvedPane, settingsShellPath?: string): string[] {
   return args;
 }
 
+/** Remembered wslpath answers: a transcript path is asked about on every Stop. */
+const wslPathCache = new Map<string, string | null>();
+
+/** Ask the distro itself where one of its paths lives on Windows (\\wsl.localhost\…). */
+function wslHostPath(distro: string | undefined, linuxPath: string): Promise<string | null> {
+  const key = JSON.stringify([distro ?? '', linuxPath]);
+  if (wslPathCache.has(key)) return Promise.resolve(wslPathCache.get(key)!);
+  const args = [...(distro ? ['-d', distro] : []), '-e', 'wslpath', '-w', linuxPath];
+  return new Promise((resolve) => {
+    execFile('wsl.exe', args, { windowsHide: true, timeout: 10_000 }, (err, stdout) => {
+      const out = err ? null : stdout.toString().trim() || null;
+      // A failure may be a VM still booting; only a real answer is worth keeping.
+      if (out) wslPathCache.set(key, out);
+      resolve(out);
+    });
+  });
+}
+
 const cmdProfile: ShellProfile = {
   id: 'cmd',
   label: 'Windows cmd',
@@ -242,6 +272,7 @@ const wslProfile: ShellProfile = {
     };
   },
   shellPath: (_pane, hostPath) => toWslPath(hostPath),
+  hostPath: (pane, linuxPath) => wslHostPath(pane.distro, linuxPath),
   claudeCommand: (pane, settings) =>
     [pane.claudeBin ?? 'claude', ...claudeFlags(pane, settings)].map(shellQuotePosix).join(' '),
 };
@@ -339,6 +370,84 @@ const dockerProfile: ShellProfile = {
     const relative = posixSlashes(path.relative(workspace, hostPath));
     return `${pane.docker.workdir}/${relative}`;
   },
+  // Claude's home is a bind mount too, so its transcripts map back through the -v flags.
+  hostPath: async (pane, containerPath) => {
+    const args = dockerArgsCache.get(pane.id);
+    return args ? toHostPath(args, containerPath) : null;
+  },
+  claudeCommand: (pane, settings) =>
+    [pane.claudeBin ?? 'claude', ...claudeFlags(pane, settings)].map(shellQuotePosix).join(' '),
+};
+
+/**
+ * The ssh argv for a pane. Authentication is left entirely to ssh — keys, the agent,
+ * ~/.ssh/config — and a password or host-key question is answered in the pane itself.
+ *
+ * The remote command is interpreted by the remote login shell, so it is quoted POSIX-style.
+ * It changes to the remote folder and then execs a login shell, which reads the profile
+ * files a plain `ssh host cmd` would skip (that is usually where npm's bin lands on PATH).
+ */
+export function buildSshArgs(pane: ResolvedPane): string[] {
+  const s = pane.ssh;
+  const host = s.host?.trim();
+  if (!host) throw new Error('Set a host for this ssh pane in Settings.');
+  // `--` below stops option parsing, but a host that looks like an option is a mistake.
+  if (host.startsWith('-')) throw new Error(`"${host}" is not a host name.`);
+  const args = ['-t'];
+  if (s.port) args.push('-p', String(s.port));
+  if (s.identityFile?.trim()) args.push('-i', s.identityFile.trim());
+  args.push(...(s.extraArgs ?? []), '--', host);
+
+  const steps: string[] = [];
+  if (s.remoteDir?.trim()) steps.push(`cd ${shellQuotePosix(s.remoteDir.trim())}`);
+  // Pane variables cannot ride on SendEnv without server configuration, so they are set on
+  // the remote shell's command line. Unlike docker's -e KEY, these values are in the argv.
+  const env = Object.entries(pane.env).map(([k, v]) => shellQuotePosix(`${k}=${v}`));
+  if (steps.length || env.length) {
+    const shell = `exec ${env.length ? `env ${env.join(' ')} ` : ''}"$SHELL" -l`;
+    args.push([...steps, shell].join(' && '));
+  }
+  return args;
+}
+
+/**
+ * A shell on another machine over ssh. Claude runs there, so the pane's folder on this
+ * machine (where hook events are written) is out of its reach: an ssh pane reports no
+ * activity state and cannot resume a conversation by id. The folder still holds its
+ * session.log.
+ */
+const sshProfile: ShellProfile = {
+  id: 'ssh',
+  label: 'SSH (remote host)',
+  enabled: true,
+  newline: '\r',
+  strictPrompt: true,
+  buildSpawn: (pane, ws) => {
+    const exe = which('ssh');
+    if (!exe) {
+      throw new Error(
+        isWindows
+          ? 'ssh was not found on PATH. Add the OpenSSH Client under Settings → System → Optional features.'
+          : 'ssh was not found on PATH. Install the OpenSSH client.',
+      );
+    }
+    return {
+      file: exe,
+      args: buildSshArgs(pane),
+      cwd: ws,
+      env: { ...baseEnv({}), COLORTERM: 'truecolor' },
+    };
+  },
+  hooksReachable: () => false,
+  hostPath: async () => null,
+  // Only for Claude panes: a plain shell over ssh loses nothing.
+  warningFor: (pane) =>
+    pane.launch === 'claude'
+      ? 'Claude runs on the remote host, out of reach of this pane’s hook events: ssh ' +
+        'panes show no activity state or token counts, and restart without resuming.'
+      : undefined,
+  // Nothing on the remote side maps to a host path; only claudeCommand's quoting matters.
+  shellPath: (_pane, hostPath) => posixSlashes(hostPath),
   claudeCommand: (pane, settings) =>
     [pane.claudeBin ?? 'claude', ...claudeFlags(pane, settings)].map(shellQuotePosix).join(' '),
 };
@@ -349,6 +458,7 @@ const registry: Record<ProfileId, ShellProfile> = {
   wsl: wslProfile,
   docker: dockerProfile,
   posix: posixProfile,
+  ssh: sshProfile,
 };
 
 export function getProfile(id: ProfileId): ShellProfile {

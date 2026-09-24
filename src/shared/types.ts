@@ -1,4 +1,4 @@
-export type ProfileId = 'cmd' | 'powershell' | 'wsl' | 'docker' | 'posix';
+export type ProfileId = 'cmd' | 'powershell' | 'wsl' | 'docker' | 'posix' | 'ssh';
 
 /**
  * Shells in the order Settings lists them, with the platforms each one exists on. Shared so
@@ -10,6 +10,7 @@ export const PROFILES: { id: ProfileId; label: string; platforms?: string[] }[] 
   { id: 'powershell', label: 'PowerShell' },
   { id: 'wsl', label: 'WSL', platforms: ['win32'] },
   { id: 'docker', label: 'Docker container' },
+  { id: 'ssh', label: 'SSH (remote host)' },
 ];
 
 export function profileAvailable(id: ProfileId, platform: string): boolean {
@@ -72,6 +73,19 @@ export interface DockerConfig {
   user?: string;
 }
 
+/** Where an ssh pane connects. Authentication is ssh's own: keys, agent, ~/.ssh/config. */
+export interface SshConfig {
+  /** Host to connect to: `host`, `user@host`, or an alias from ~/.ssh/config. */
+  host?: string;
+  port?: number;
+  /** Private key passed as `ssh -i`. */
+  identityFile?: string;
+  /** Folder on the remote host to start in; the remote login directory when unset. */
+  remoteDir?: string;
+  /** Extra arguments inserted before the host, e.g. -J jumphost, -o ServerAliveInterval=30. */
+  extraArgs?: string[];
+}
+
 /** A pane exactly as it appears in multitask.config.json; unset fields inherit defaults. */
 export interface PaneConfig {
   id: string;
@@ -81,6 +95,8 @@ export interface PaneConfig {
   distro?: string;
   /** Container settings, only for profile 'docker'. */
   docker?: DockerConfig;
+  /** Remote host settings, only for profile 'ssh'. */
+  ssh?: SshConfig;
   /** This pane's artifact folder, relative to the app root or absolute. */
   workspace?: string;
   /** Terminal colour theme id; see src/shared/themes.ts. Falls back to the default. */
@@ -99,6 +115,8 @@ export interface PaneConfig {
   autoSubmit?: boolean;
   /** Reuse the previous conversation when this pane restarts. Defaults to true. */
   resume?: boolean;
+  /** Wipe the terminal's screen and scrollback when the pane (re)starts. Defaults to false. */
+  clearOnRestart?: boolean;
 }
 
 export interface ResolvedDocker extends DockerConfig {
@@ -126,9 +144,11 @@ export interface ResolvedPane extends PaneConfig {
   autoStart: boolean;
   autoSubmit: boolean;
   resume: boolean;
+  clearOnRestart: boolean;
   /** Session id from a previous run of this pane, when one is known. */
   resumeSessionId?: string;
   docker: ResolvedDocker;
+  ssh: SshConfig;
 }
 
 export interface Defaults {
@@ -145,6 +165,7 @@ export interface Defaults {
   autoStart: boolean;
   autoSubmit: boolean;
   resume?: boolean;
+  clearOnRestart?: boolean;
   /** Play a short sound when a pane starts waiting on you. Off by default. */
   sound?: boolean;
   fontSize: number;
@@ -209,6 +230,26 @@ export interface PaneState {
   lastEventAt?: number;
   /** Turns completed in this session, for a sense of progress. */
   turns: number;
+  /** Token totals for the conversation, read from Claude's transcript. */
+  usage?: PaneUsage;
+}
+
+/**
+ * Tokens the pane's conversation has used so far, summed from the assistant messages in
+ * Claude Code's transcript. Covers the main conversation; subagents keep their own files.
+ */
+export interface PaneUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /**
+   * What these tokens would cost at Anthropic API list prices. Undefined when a model in
+   * the conversation has no known price. Subscription plans are not billed per token.
+   */
+  costUsd?: number;
+  /** Model of the most recent assistant message. */
+  model?: string;
 }
 
 export interface Preflight {

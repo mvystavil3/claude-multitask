@@ -6,6 +6,7 @@ import type {
   PaneConfig,
   Preflight,
   ProfileId,
+  SshConfig,
 } from '../shared/types.js';
 import { PROFILES, profileAvailable } from '../shared/types.js';
 import { comboInput, el, field, linesToArray, numberInput, select, themeField } from './dom.js';
@@ -195,6 +196,10 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
   const defAutoSubmit = el('input', { type: 'checkbox', checked: draft.defaults.autoSubmit });
   const defResume = el('input', { type: 'checkbox', checked: draft.defaults.resume ?? true });
   const defSound = el('input', { type: 'checkbox', checked: draft.defaults.sound ?? false });
+  const defClear = el('input', {
+    type: 'checkbox',
+    checked: draft.defaults.clearOnRestart ?? false,
+  });
 
   const globalPanel = el('div', { className: 'panel' }, [
     el('h3', { textContent: 'Global' }),
@@ -228,6 +233,13 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
         'Off starts a fresh session every time.',
       ),
       field('Sound when a pane needs you', defSound, 'Off by default; the border pulses anyway.'),
+    ]),
+    el('div', { className: 'row' }, [
+      field(
+        'Clear the terminal on restart',
+        defClear,
+        'Off keeps the previous run’s output above the new one.',
+      ),
     ]),
     el('p', { className: 'muted' }, [
       `Config file: ${preflight?.configPath ?? 'multitask.config.json'}`,
@@ -269,6 +281,7 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
     draft.defaults.autoSubmit = defAutoSubmit.checked;
     draft.defaults.resume = defResume.checked;
     draft.defaults.sound = defSound.checked;
+    draft.defaults.clearOnRestart = defClear.checked;
   }
 
   function renderList(): void {
@@ -418,6 +431,21 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
       type: 'checkbox',
       checked: pane.resume ?? draft.defaults.resume ?? true,
     });
+    const clearOnRestart = el('input', {
+      type: 'checkbox',
+      checked: pane.clearOnRestart ?? draft.defaults.clearOnRestart ?? false,
+    });
+
+    const sh: SshConfig = pane.ssh ?? {};
+    const sshHost = el('input', { value: sh.host ?? '', placeholder: 'user@host or a ~/.ssh/config alias' });
+    const sshPort = el('input', { value: sh.port ? String(sh.port) : '', placeholder: '22' });
+    const sshIdentity = el('input', { value: sh.identityFile ?? '', placeholder: '~/.ssh/id_ed25519' });
+    const sshRemoteDir = el('input', { value: sh.remoteDir ?? '', placeholder: 'login directory' });
+    const sshExtra = el('textarea', {
+      value: (sh.extraArgs ?? []).join('\n'),
+      rows: 2,
+      placeholder: '-J\njumphost',
+    });
 
     const dk: DockerConfig = pane.docker ?? {};
     const dockerImage = comboInput(
@@ -485,6 +513,18 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
       pane.autoStart = autoStart.checked;
       pane.autoSubmit = autoSubmit.checked;
       pane.resume = resume.checked;
+      pane.clearOnRestart = clearOnRestart.checked;
+
+      const ssh: SshConfig = {};
+      if (sshHost.value.trim()) ssh.host = sshHost.value.trim();
+      const port = Math.round(Number(sshPort.value.trim()));
+      if (port >= 1 && port <= 65535) ssh.port = port;
+      sshPort.value = ssh.port ? String(ssh.port) : '';
+      if (sshIdentity.value.trim()) ssh.identityFile = sshIdentity.value.trim();
+      if (sshRemoteDir.value.trim()) ssh.remoteDir = sshRemoteDir.value.trim();
+      const sshArgs = linesToArray(sshExtra.value);
+      if (sshArgs.length) ssh.extraArgs = sshArgs;
+      pane.ssh = Object.keys(ssh).length ? ssh : undefined;
 
       // Only keep the fields that were actually set, so the JSON stays readable and
       // unset fields keep inheriting from defaults.
@@ -520,6 +560,12 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
       autoStart,
       autoSubmit,
       resume,
+      clearOnRestart,
+      sshHost,
+      sshPort,
+      sshIdentity,
+      sshRemoteDir,
+      sshExtra,
       dockerImage.input,
       dockerMode,
       dockerContainer.input,
@@ -587,6 +633,26 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
       ];
     }
 
+    function sshSection(): HTMLElement[] {
+      return [
+        el('h3', { textContent: 'Remote host' }),
+        el('div', { className: 'row' }, [
+          field('Host', sshHost, 'Signs in with your ssh keys, agent and ~/.ssh/config.'),
+          field('Port', sshPort),
+        ]),
+        el('div', { className: 'row' }, [
+          field('Remote folder', sshRemoteDir, 'Where the shell starts on the remote host.'),
+          field('Identity file', sshIdentity, 'Optional; ssh -i.'),
+        ]),
+        field('Extra ssh arguments', sshExtra, 'One per line.'),
+        el('p', { className: 'muted' }, [
+          'A password or host-key question is answered in the pane itself. Claude runs on ' +
+            'the remote host, so ssh panes show no activity state or token counts. The ' +
+            'working folder below only holds this pane’s session log.',
+        ]),
+      ];
+    }
+
     paneForm.append(
       el('h3', { textContent: 'Terminal' }),
       el('div', { className: 'row' }, [
@@ -598,6 +664,7 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
         ...(effectiveProfile === 'wsl' ? [field('WSL distro', distro)] : []),
       ]),
       ...(effectiveProfile === 'docker' ? dockerSection() : []),
+      ...(effectiveProfile === 'ssh' ? sshSection() : []),
       el('div', { className: 'row workspace-row' }, [
         field(
           'Working folder',
@@ -648,6 +715,7 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
         field('Auto-start', autoStart),
         ...(effectiveLaunch === 'shell' ? [] : [field('Auto-submit prompt', autoSubmit)]),
         ...(effectiveLaunch === 'claude' ? [field('Resume on restart', resume)] : []),
+        field('Clear on restart', clearOnRestart),
       ]),
     );
   }
@@ -676,6 +744,13 @@ export function openSettings({ config, preflight, focusPaneId, onSave }: Options
         );
         if (noCommand) {
           alertBar(`Terminal "${noCommand.title || noCommand.id}" is set to run a command but none is set.`);
+          return;
+        }
+        const noHost = draft.panes.find(
+          (p) => (p.profile ?? draft.defaults.profile) === 'ssh' && !p.ssh?.host?.trim(),
+        );
+        if (noHost) {
+          alertBar(`Terminal "${noHost.title || noHost.id}" uses ssh but has no host.`);
           return;
         }
         await onSave(draft);

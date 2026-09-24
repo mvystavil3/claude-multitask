@@ -15,7 +15,7 @@ import type {
 import { DEFAULT_THEME_ID, PALETTE_KEYS, getTheme, setCustomThemes } from '../shared/themes.js';
 import type { TerminalPalette } from '../shared/themes.js';
 
-const profileId = z.enum(['cmd', 'powershell', 'wsl', 'docker', 'posix']);
+const profileId = z.enum(['cmd', 'powershell', 'wsl', 'docker', 'posix', 'ssh']);
 const launchMode = z.enum(['claude', 'command', 'shell']);
 
 // Built from PALETTE_KEYS so a new colour slot cannot be forgotten here. The cast just
@@ -48,6 +48,14 @@ const dockerSchema = z.object({
   user: z.string().optional(),
 });
 
+const sshSchema = z.object({
+  host: z.string().optional(),
+  port: z.number().int().min(1).max(65535).optional(),
+  identityFile: z.string().optional(),
+  remoteDir: z.string().optional(),
+  extraArgs: z.array(z.string()).optional(),
+});
+
 const DOCKER_DEFAULTS = {
   image: 'claude-multitask:latest',
   mode: 'run' as const,
@@ -71,6 +79,7 @@ const paneSchema = z.object({
   command: z.string().optional(),
   distro: z.string().optional(),
   docker: dockerSchema.optional(),
+  ssh: sshSchema.optional(),
   workspace: z.string().optional(),
   task: z.string().default(''),
   model: z.string().optional(),
@@ -80,6 +89,7 @@ const paneSchema = z.object({
   autoStart: z.boolean().optional(),
   autoSubmit: z.boolean().optional(),
   resume: z.boolean().optional(),
+  clearOnRestart: z.boolean().optional(),
 });
 
 const configSchema = z.object({
@@ -100,6 +110,7 @@ const configSchema = z.object({
       autoStart: z.boolean().default(false),
       autoSubmit: z.boolean().default(true),
       resume: z.boolean().default(true),
+      clearOnRestart: z.boolean().default(false),
       sound: z.boolean().default(false),
       fontSize: z.number().int().min(8).max(32).default(13),
       docker: dockerSchema.optional(),
@@ -185,8 +196,10 @@ export function resolvePanes(cfg: AppConfig): ResolvedPane[] {
     autoStart: p.autoStart ?? d.autoStart,
     autoSubmit: p.autoSubmit ?? d.autoSubmit,
     resume: p.resume ?? d.resume ?? true,
+    clearOnRestart: p.clearOnRestart ?? d.clearOnRestart ?? false,
     env: p.env ?? {},
     docker: resolveDocker(p, d.docker),
+    ssh: p.ssh ?? {},
   }));
 }
 

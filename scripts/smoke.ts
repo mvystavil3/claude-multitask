@@ -30,6 +30,9 @@ const pane: ResolvedPane = {
   env: {},
   autoStart: true,
   autoSubmit: true,
+  resume: true,
+  clearOnRestart: false,
+  ssh: { host: process.env.SMOKE_SSH_HOST || undefined, remoteDir: process.env.SMOKE_SSH_DIR || undefined },
   // The app fills these from defaults via resolvePanes(); the harness must do it itself.
   docker: {
     image: process.env.SMOKE_IMAGE || 'claude-multitask:latest',
@@ -46,7 +49,7 @@ const pane: ResolvedPane = {
 const session = new Session(pane, ws, {
   onData: (_id, chunk) => process.stdout.write(chunk),
   onState: (s) =>
-    console.log(`\n\x1b[36m[state] ${s.status}${s.pid ? ' pid=' + s.pid : ''}${s.message ? ' :: ' + s.message : ''} promptSent=${s.promptSent} activity=${s.activity}${s.needsReason ? '(' + s.needsReason + ')' : ''}\x1b[0m`),
+    console.log(`\n\x1b[36m[state] ${s.status}${s.pid ? ' pid=' + s.pid : ''}${s.message ? ' :: ' + s.message : ''} promptSent=${s.promptSent} activity=${s.activity}${s.needsReason ? '(' + s.needsReason + ')' : ''}${s.usage ? ' usage=' + JSON.stringify(s.usage) : ''}\x1b[0m`),
 });
 
 session.resize(120, 34);

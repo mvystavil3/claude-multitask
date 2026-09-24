@@ -13,9 +13,10 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Session } from '../src/main/session.js';
-import { getProfile, toWslPath, unavailableReason } from '../src/main/profiles.js';
+import { buildSshArgs, getProfile, toWslPath, unavailableReason } from '../src/main/profiles.js';
 import { prepareHooks, settingsPath } from '../src/main/hooks.js';
-import { buildRunArgs } from '../src/main/docker.js';
+import { buildRunArgs, toHostPath } from '../src/main/docker.js';
+import { TranscriptUsage, messageCost } from '../src/main/usage.js';
 import {
   defaultProfileFor,
   profileAvailable,
@@ -41,6 +42,8 @@ function pane(overrides: Partial<ResolvedPane> = {}): ResolvedPane {
     autoStart: false,
     autoSubmit: false,
     resume: true,
+    clearOnRestart: false,
+    ssh: {},
     docker: {
       image: 'claude-multitask:latest',
       mode: 'run',
@@ -135,6 +138,87 @@ test('Linux containers run as the host user unless a user is set', async () => {
   explicit.docker = { ...explicit.docker, user: 'root' };
   const own = await buildRunArgs(explicit, explicit.workspace);
   assert.equal(own.args[own.args.indexOf('--user') + 1], 'root');
+});
+
+test('container paths map back to the host through the -v flags', () => {
+  const args = ['run', '-v', 'C:/Users/Ann Lee/.claude:/root/.claude', '-v', '/srv/p:/work:ro'];
+  assert.equal(
+    toHostPath(args, '/root/.claude/projects/-work/abc.jsonl'),
+    path.join('C:/Users/Ann Lee/.claude', 'projects', '-work', 'abc.jsonl'),
+  );
+  assert.equal(toHostPath(args, '/work'), path.normalize('/srv/p'));
+  assert.equal(toHostPath(args, '/workspace/x'), null);
+  assert.equal(toHostPath(args, '/tmp/x'), null);
+});
+
+// ---------- ssh ----------
+
+test('ssh argv keeps the host after --, and quotes the remote command', () => {
+  const p = pane({
+    profile: 'ssh',
+    env: { NOTE: "it's" },
+    ssh: { host: 'ann@box', port: 2222, remoteDir: '/srv/my project', extraArgs: ['-J', 'jump'] },
+  });
+  const args = buildSshArgs(p);
+  assert.deepEqual(args.slice(0, 7), ['-t', '-p', '2222', '-J', 'jump', '--', 'ann@box']);
+  assert.equal(
+    args[7],
+    `cd '/srv/my project' && exec env 'NOTE=it'\\''s' "$SHELL" -l`,
+  );
+  assert.deepEqual(buildSshArgs(pane({ profile: 'ssh', ssh: { host: 'box' } })), ['-t', '--', 'box']);
+});
+
+test('ssh refuses a missing or option-like host', () => {
+  assert.throws(() => buildSshArgs(pane({ profile: 'ssh' })), /host/);
+  assert.throws(() => buildSshArgs(pane({ profile: 'ssh', ssh: { host: '-oProxyCommand=x' } })));
+});
+
+// ---------- usage ----------
+
+const line = (id: string, model: string, usage: object) =>
+  JSON.stringify({ type: 'assistant', message: { id, model, usage } }) + '\n';
+
+test('transcript usage counts each message once, using its latest line', () => {
+  const t = new TranscriptUsage();
+  const u1 = { input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 1000 };
+  t.consume(line('m1', 'claude-opus-5', u1));
+  t.consume(line('m1', 'claude-opus-5', { ...u1, output_tokens: 200 }));
+  t.consume(JSON.stringify({ type: 'user', message: { content: 'hi' } }) + '\n');
+  t.consume(line('m2', 'claude-opus-5', { input_tokens: 5, output_tokens: 50 }).slice(0, 20));
+  const partial = t.totals()!;
+  assert.equal(partial.outputTokens, 200);
+  assert.equal(partial.inputTokens, 10);
+  // 10*5 + 200*25 + 1000*0.5 per million
+  assert.ok(Math.abs(partial.costUsd! - 5550 / 1e6) < 1e-12, String(partial.costUsd));
+});
+
+test('usage has no cost when a model has no known price', () => {
+  const t = new TranscriptUsage();
+  t.consume(line('m1', 'claude-sonnet-5', { input_tokens: 1, output_tokens: 1 }));
+  t.consume(line('m2', 'some-other-model', { input_tokens: 1, output_tokens: 1 }));
+  assert.equal(t.totals()!.costUsd, undefined);
+  assert.equal(t.totals()!.inputTokens, 2);
+  // Model ids: a later opus must not be priced as opus-5, and 1h cache writes cost 2x.
+  assert.equal(messageCost('claude-opus-5-5', { output_tokens: 1e6 }), 20);
+  assert.equal(
+    messageCost('claude-haiku-4-5', {
+      cache_creation_input_tokens: 2e6,
+      cache_creation: { ephemeral_1h_input_tokens: 1e6 },
+    }),
+    1.25 + 2,
+  );
+});
+
+test('usage reads a transcript file incrementally', async () => {
+  const dir = tempDir();
+  const file = path.join(dir, 't.jsonl');
+  const { appendFileSync, writeFileSync } = await import('node:fs');
+  writeFileSync(file, line('a', 'claude-haiku-4-5', { input_tokens: 3, output_tokens: 4 }));
+  const t = new TranscriptUsage();
+  t.follow(file);
+  assert.equal((await t.read())!.outputTokens, 4);
+  appendFileSync(file, line('b', 'claude-haiku-4-5', { input_tokens: 3, output_tokens: 6 }));
+  assert.equal((await t.read())!.outputTokens, 10);
 });
 
 // ---------- real sessions ----------
